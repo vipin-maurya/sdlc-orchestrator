@@ -1,0 +1,17 @@
+# Line endings are LF in the repository and LF in the working tree, regardless
+# of the machine's core.autocrlf. Everything here reads LF happily — the Go
+# toolchain, git bash, and PowerShell 5.1 — and pinning it keeps a Windows
+# checkout from rewriting every file and producing diffs that are pure \r.
+* text=auto eol=lf
+
+# Batch files are the one format where CRLF is genuinely load-bearing: a label
+# or a goto can misparse without it.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Images in docs are bytes, not text, and must never be line-ending converted
+# or diffed.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.webp binary

@@ -1,0 +1,646 @@
+// Package config defines the sdlc.yaml schema (docs/SPEC.md §12), its
+// defaults, strict decoding (unknown keys rejected), env-var expansion, and
+// cross-field validation including the backend-independence guardrail.
+package config
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"time"
+
+	"gopkg.in/yaml.v3"
+)
+
+// Duration is a time.Duration that unmarshals from YAML strings like "30m".
+type Duration time.Duration
+
+func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
+	var s string
+	if err := node.Decode(&s); err != nil {
+		return err
+	}
+	if s == "" {
+		*d = 0
+		return nil
+	}
+	v, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	*d = Duration(v)
+	return nil
+}
+
+func (d Duration) D() time.Duration { return time.Duration(d) }
+
+func (d Duration) String() string { return time.Duration(d).String() }
+
+// Agent state names. These are the only states that invoke an agent; the
+// full state enum lives in the engine package.
+const (
+	StPlanning     = "PLANNING"
+	StDesignReview = "DESIGN_REVIEW"
+	StImplementing = "IMPLEMENTING"
+	StCodeReview   = "CODE_REVIEW"
+	StAnalyzing    = "ANALYZING"
+	StFixing       = "FIXING"
+	StFinalReview  = "FINAL_REVIEW"
+)
+
+// AgentStates lists every state that must have an entry under `states:`.
+var AgentStates = []string{
+	StPlanning, StDesignReview, StImplementing, StCodeReview,
+	StAnalyzing, StFixing, StFinalReview,
+}
+
+type Config struct {
+	Orchestrator Orchestrator       `yaml:"orchestrator"`
+	Database     Database           `yaml:"database"`
+	Limits       Limits             `yaml:"limits"`
+	Resources    Resources          `yaml:"resources"`
+	Backends     map[string]Backend `yaml:"backends"`
+	Agents       map[string]Agent   `yaml:"agents"`
+	States       map[string]State   `yaml:"states"`
+	Policies     Policies           `yaml:"policies"`
+	Git          Git                `yaml:"git"`
+	Targets      map[string]Target  `yaml:"targets"`
+
+	// Path holds the absolute path of the loaded config file (not a YAML key).
+	Path string `yaml:"-"`
+}
+
+type Orchestrator struct {
+	DataDir         string   `yaml:"data_dir"`
+	MaxParallelJobs int      `yaml:"max_parallel_jobs"`
+	PollInterval    Duration `yaml:"poll_interval"`
+	JobIDPrefix     string   `yaml:"job_id_prefix"`
+	LockFile        string   `yaml:"lock_file"`
+}
+
+type Database struct {
+	Path        string   `yaml:"path"`
+	BusyTimeout Duration `yaml:"busy_timeout"`
+}
+
+type Limits struct {
+	MaxJobDuration           Duration `yaml:"max_job_duration"`
+	MaxDesignReviewRounds    int      `yaml:"max_design_review_rounds"`
+	MaxCodeReviewRounds      int      `yaml:"max_code_review_rounds"`
+	MaxFixAttempts           int      `yaml:"max_fix_attempts"`
+	MaxFlakeRetries          int      `yaml:"max_flake_retries"`
+	FlakeRerunCount          int      `yaml:"flake_rerun_count"`
+	MaxAgentRetries          int      `yaml:"max_agent_retries"`
+	MaxReleaseRetries        int      `yaml:"max_release_retries"`
+	ReleaseRetryBackoff      Duration `yaml:"release_retry_backoff"`
+	MaxAgentInvocationsPerJob int     `yaml:"max_agent_invocations_per_job"`
+	LogExcerptLines          int      `yaml:"log_excerpt_lines"`
+	LogErrorPatterns         []string `yaml:"log_error_patterns"`
+}
+
+type Resources struct {
+	GradleSlots int     `yaml:"gradle_slots"`
+	Devices     Devices `yaml:"devices"`
+}
+
+type Devices struct {
+	Serials        []string     `yaml:"serials"`
+	Discover       bool         `yaml:"discover"`
+	AdbBinary      string       `yaml:"adb_binary"`
+	AcquireTimeout Duration     `yaml:"acquire_timeout"`
+	BootEmulator   BootEmulator `yaml:"boot_emulator"`
+}
+
+type BootEmulator struct {
+	Enabled        bool     `yaml:"enabled"`
+	AVDName        string   `yaml:"avd_name"`
+	EmulatorBinary string   `yaml:"emulator_binary"`
+	BootTimeout    Duration `yaml:"boot_timeout"`
+	Headless       bool     `yaml:"headless"`
+	KillAfterJob   bool     `yaml:"kill_after_job"`
+}
+
+type Backend struct {
+	// Kind selects the adapter: "claude", "agy", or "exec".
+	// Defaults to the backend's map key so the standard `claude:`/`agy:`
+	// entries need no kind field.
+	Kind           string   `yaml:"kind"`
+	Binary         string   `yaml:"binary"`
+	DefaultTimeout Duration `yaml:"default_timeout"`
+	// PermissionMode: for claude, passed to --permission-mode (e.g.
+	// bypassPermissions). For agy, "skip" passes
+	// --dangerously-skip-permissions (required for headless shell access —
+	// agy soft-denies shell commands otherwise); "default" passes nothing.
+	PermissionMode string `yaml:"permission_mode"`
+	PrintTimeout       Duration `yaml:"print_timeout"`        // agy only
+	SettingsFile       string   `yaml:"settings_file"`        // agy only
+	EnsurePermissions  []string `yaml:"ensure_permissions"`   // agy only
+	AssertModel        bool     `yaml:"assert_model"`         // agy only
+	QuotaErrorPatterns []string `yaml:"quota_error_patterns"`
+	QuotaBackoff       Duration `yaml:"quota_backoff"`
+	ExpectedVersion    string   `yaml:"expected_version"`
+	ExtraArgs          []string `yaml:"extra_args"`
+	// ArgvTemplate is used by kind "exec": each element is expanded with
+	// {model} {effort} {prompt_file} placeholders. Prompt text is also piped
+	// to stdin.
+	ArgvTemplate []string `yaml:"argv_template"`
+}
+
+type Agent struct {
+	Backend string `yaml:"backend"`
+	Model   string `yaml:"model"`
+	Effort  string `yaml:"effort"`
+}
+
+type State struct {
+	Agent                 string   `yaml:"agent"`
+	Prompt                string   `yaml:"prompt"` // path; "" = embedded default
+	Timeout               Duration `yaml:"timeout"`
+	AllowedTools          []string `yaml:"allowed_tools"`
+	DisallowedTools       []string `yaml:"disallowed_tools"`
+	MustDifferBackendFrom string   `yaml:"must_differ_backend_from"`
+}
+
+type Policies struct {
+	ProtectedBranches        []string `yaml:"protected_branches"`
+	ProtectTestsOnCodeBugFix bool     `yaml:"protect_tests_on_code_bug_fix"`
+	TestFileGlobs            []string `yaml:"test_file_globs"`
+	ReviewerDiffMustBeEmpty  bool     `yaml:"reviewer_diff_must_be_empty"`
+}
+
+type Git struct {
+	CleanupWorktrees      string `yaml:"cleanup_worktrees"` // on_success | always | never
+	DeleteBranchOnSuccess bool   `yaml:"delete_branch_on_success"`
+}
+
+type Target struct {
+	RepoPath      string    `yaml:"repo_path"`
+	DefaultBranch string    `yaml:"default_branch"`
+	BranchPrefix  string    `yaml:"branch_prefix"`
+	WorktreesDir  string    `yaml:"worktrees_dir"` // "" = <repo_path>/.worktrees
+	Gradle        GradleCfg `yaml:"gradle"`
+	Build         BuildCfg  `yaml:"build"`
+	UnitTest      CmdCfg    `yaml:"unit_test"`
+	Lint          LintCfg   `yaml:"lint"`
+	UITest        UITestCfg `yaml:"ui_test"`
+	Merge         MergeCfg  `yaml:"merge"`
+	Ship          ShipCfg   `yaml:"ship"`
+}
+
+type GradleCfg struct {
+	IsolatedUserHome bool `yaml:"isolated_user_home"`
+}
+
+type BuildCfg struct {
+	Commands [][]string `yaml:"commands"`
+	Timeout  Duration   `yaml:"timeout"`
+}
+
+type CmdCfg struct {
+	Command []string `yaml:"command"`
+	Timeout Duration `yaml:"timeout"`
+}
+
+type LintCfg struct {
+	Command []string `yaml:"command"`
+	RunIn   string   `yaml:"run_in"` // building | testing | off
+	Timeout Duration `yaml:"timeout"`
+}
+
+type UITestCfg struct {
+	Enabled    bool     `yaml:"enabled"`
+	Command    []string `yaml:"command"`
+	Timeout    Duration `yaml:"timeout"`
+	OnNoDevice string   `yaml:"on_no_device"` // skip | fail | wait
+}
+
+type MergeCfg struct {
+	RebaseBeforeMerge bool   `yaml:"rebase_before_merge"`
+	VerifyAfterRebase string `yaml:"verify_after_rebase"` // build | none
+	Push              string `yaml:"push"`                // auto | never
+}
+
+type ShipCfg struct {
+	Command []string `yaml:"command"`
+	// ResumeCommand clears the ship tool's sticky halt before a retry when
+	// auto_resume_halt is true (e.g. ["autoship", "resume", "--config", "autoship.yaml"]).
+	ResumeCommand  []string `yaml:"resume_command"`
+	Timeout        Duration `yaml:"timeout"`
+	AutoResumeHalt bool     `yaml:"auto_resume_halt"`
+}
+
+// Default returns the full default configuration from SPEC §12 (targets empty).
+func Default() *Config {
+	return &Config{
+		Orchestrator: Orchestrator{
+			DataDir:         "./data",
+			MaxParallelJobs: 2,
+			PollInterval:    Duration(3 * time.Second),
+			JobIDPrefix:     "JOB",
+		},
+		Database: Database{BusyTimeout: Duration(5 * time.Second)},
+		Limits: Limits{
+			MaxJobDuration:            Duration(12 * time.Hour),
+			MaxDesignReviewRounds:     2,
+			MaxCodeReviewRounds:       3,
+			MaxFixAttempts:            3,
+			MaxFlakeRetries:           2,
+			FlakeRerunCount:           3,
+			MaxAgentRetries:           2,
+			MaxReleaseRetries:         3,
+			ReleaseRetryBackoff:       Duration(10 * time.Minute),
+			MaxAgentInvocationsPerJob: 40,
+			LogExcerptLines:           200,
+			LogErrorPatterns:          []string{`(?i)error`, `(?i)exception`, `FAILED`},
+		},
+		Resources: Resources{
+			GradleSlots: 1,
+			Devices: Devices{
+				Discover:       true,
+				AdbBinary:      "adb",
+				AcquireTimeout: Duration(10 * time.Minute),
+				BootEmulator: BootEmulator{
+					EmulatorBinary: "emulator",
+					BootTimeout:    Duration(6 * time.Minute),
+					Headless:       true,
+					KillAfterJob:   true,
+				},
+			},
+		},
+		Backends: map[string]Backend{
+			"claude": {
+				Kind:           "claude",
+				Binary:         "claude",
+				DefaultTimeout: Duration(30 * time.Minute),
+				PermissionMode: "bypassPermissions",
+				QuotaErrorPatterns: []string{
+					`(?i)rate.?limit`, `(?i)usage.?limit`, `(?i)overloaded`, `(?i)quota`,
+				},
+				QuotaBackoff: Duration(30 * time.Minute),
+			},
+			"agy": {
+				Kind:           "agy",
+				Binary:         "agy",
+				DefaultTimeout: Duration(30 * time.Minute),
+				PermissionMode: "skip",
+				PrintTimeout:   Duration(45 * time.Minute),
+				SettingsFile:   "${USERPROFILE}/.gemini/antigravity-cli/settings.json",
+				AssertModel:    true,
+				QuotaErrorPatterns: []string{
+					`(?i)rate.?limit`, `(?i)quota`, `(?i)resource.?exhausted`,
+				},
+				QuotaBackoff: Duration(30 * time.Minute),
+			},
+		},
+		Agents: map[string]Agent{
+			"opus":   {Backend: "claude", Model: "opus", Effort: "high"},
+			"sonnet": {Backend: "claude", Model: "sonnet"},
+			"gemini": {Backend: "agy", Model: "gemini-3-pro", Effort: "medium"},
+		},
+		// Review/analyze states keep Write (they must emit their .sdlc output
+		// file); source-tree immutability is enforced mechanically by the
+		// clean-tree check, and the diff they review is pre-staged by the
+		// orchestrator so Bash is not needed.
+		States: map[string]State{
+			StPlanning:     {Agent: "opus", Timeout: Duration(30 * time.Minute)},
+			StDesignReview: {Agent: "sonnet", Timeout: Duration(15 * time.Minute), DisallowedTools: []string{"Edit", "NotebookEdit", "Bash"}},
+			StImplementing: {Agent: "gemini", Timeout: Duration(45 * time.Minute)},
+			StCodeReview:   {Agent: "opus", Timeout: Duration(20 * time.Minute), DisallowedTools: []string{"Edit", "NotebookEdit", "Bash"}, MustDifferBackendFrom: StImplementing},
+			StAnalyzing:    {Agent: "sonnet", Timeout: Duration(10 * time.Minute), DisallowedTools: []string{"Edit", "NotebookEdit", "Bash"}},
+			StFixing:       {Agent: "gemini", Timeout: Duration(45 * time.Minute)},
+			StFinalReview:  {Agent: "opus", Timeout: Duration(20 * time.Minute), DisallowedTools: []string{"Edit", "NotebookEdit", "Bash"}, MustDifferBackendFrom: StImplementing},
+		},
+		Policies: Policies{
+			ProtectedBranches:        []string{"main", "master"},
+			ProtectTestsOnCodeBugFix: true,
+			TestFileGlobs: []string{
+				"**/src/test/**", "**/src/androidTest/**", "**/*Test.kt", "**/*Test.java",
+			},
+			ReviewerDiffMustBeEmpty: true,
+		},
+		Git: Git{CleanupWorktrees: "on_success"},
+	}
+}
+
+var envVarRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+
+// expandEnv replaces ${VAR} with the environment value when VAR is set;
+// unset variables are left verbatim (so e.g. a literal ${data_dir} written
+// by a user surfaces as an obvious path error rather than silently vanishing).
+func expandEnv(s string) string {
+	return envVarRe.ReplaceAllStringFunc(s, func(m string) string {
+		name := envVarRe.FindStringSubmatch(m)[1]
+		if v, ok := os.LookupEnv(name); ok {
+			return v
+		}
+		return m
+	})
+}
+
+// Load reads path, decodes it strictly over Default(), applies computed
+// defaults and env expansion, and validates. path=="" resolves via
+// SDLC_CONFIG then ./sdlc.yaml.
+func Load(path string) (*Config, error) {
+	if path == "" {
+		path = os.Getenv("SDLC_CONFIG")
+	}
+	if path == "" {
+		path = "sdlc.yaml"
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+	cfg := Default()
+	dec := yaml.NewDecoder(strings.NewReader(expandEnv(string(raw))))
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", abs, err)
+	}
+	cfg.Path = abs
+	cfg.applyComputedDefaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("%s: %w", abs, err)
+	}
+	return cfg, nil
+}
+
+// applyComputedDefaults fills fields whose default depends on other fields,
+// and re-fills per-state/backend zero values that a partial user entry reset.
+func (c *Config) applyComputedDefaults() {
+	base := c.Path
+	if base != "" {
+		base = filepath.Dir(base)
+	} else {
+		base, _ = os.Getwd()
+	}
+	if !filepath.IsAbs(c.Orchestrator.DataDir) {
+		c.Orchestrator.DataDir = filepath.Join(base, c.Orchestrator.DataDir)
+	}
+	if c.Database.Path == "" {
+		c.Database.Path = filepath.Join(c.Orchestrator.DataDir, "sdlc.db")
+	}
+	if c.Orchestrator.LockFile == "" {
+		c.Orchestrator.LockFile = filepath.Join(c.Orchestrator.DataDir, "engine.lock")
+	}
+	if c.Resources.Devices.AdbBinary == "" {
+		c.Resources.Devices.AdbBinary = "adb"
+	}
+	def := Default()
+	for name, b := range c.Backends {
+		if b.Kind == "" {
+			if name == "claude" || name == "agy" {
+				b.Kind = name
+			} else {
+				b.Kind = "exec"
+			}
+		}
+		if d, ok := def.Backends[name]; ok {
+			if b.Binary == "" {
+				b.Binary = d.Binary
+			}
+			if b.DefaultTimeout == 0 {
+				b.DefaultTimeout = d.DefaultTimeout
+			}
+			if b.PermissionMode == "" {
+				b.PermissionMode = d.PermissionMode
+			}
+			if b.PrintTimeout == 0 {
+				b.PrintTimeout = d.PrintTimeout
+			}
+			if b.SettingsFile == "" {
+				b.SettingsFile = d.SettingsFile
+			}
+			if len(b.QuotaErrorPatterns) == 0 {
+				b.QuotaErrorPatterns = d.QuotaErrorPatterns
+			}
+			if b.QuotaBackoff == 0 {
+				b.QuotaBackoff = d.QuotaBackoff
+			}
+		}
+		if b.DefaultTimeout == 0 {
+			b.DefaultTimeout = Duration(30 * time.Minute)
+		}
+		if b.QuotaBackoff == 0 {
+			b.QuotaBackoff = Duration(30 * time.Minute)
+		}
+		b.SettingsFile = expandEnv(b.SettingsFile)
+		c.Backends[name] = b
+	}
+	for name, s := range c.States {
+		d, ok := def.States[name]
+		if !ok {
+			continue
+		}
+		if s.Agent == "" {
+			s.Agent = d.Agent
+		}
+		if s.Timeout == 0 {
+			s.Timeout = d.Timeout
+		}
+		c.States[name] = s
+	}
+	for _, name := range AgentStates {
+		if _, ok := c.States[name]; !ok {
+			c.States[name] = def.States[name]
+		}
+	}
+	for key, t := range c.Targets {
+		if t.DefaultBranch == "" {
+			t.DefaultBranch = "main"
+		}
+		if t.BranchPrefix == "" {
+			t.BranchPrefix = "sdlc/"
+		}
+		if t.WorktreesDir == "" {
+			t.WorktreesDir = filepath.Join(t.RepoPath, ".worktrees")
+		}
+		if t.Build.Timeout == 0 {
+			t.Build.Timeout = Duration(30 * time.Minute)
+		}
+		if t.UnitTest.Timeout == 0 {
+			t.UnitTest.Timeout = Duration(30 * time.Minute)
+		}
+		if t.Lint.Timeout == 0 {
+			t.Lint.Timeout = Duration(20 * time.Minute)
+		}
+		if t.Lint.RunIn == "" {
+			t.Lint.RunIn = "off"
+		}
+		if t.UITest.Timeout == 0 {
+			t.UITest.Timeout = Duration(40 * time.Minute)
+		}
+		if t.UITest.OnNoDevice == "" {
+			t.UITest.OnNoDevice = "skip"
+		}
+		if t.Merge.VerifyAfterRebase == "" {
+			t.Merge.VerifyAfterRebase = "build"
+		}
+		if t.Merge.Push == "" {
+			t.Merge.Push = "auto"
+		}
+		if t.Ship.Timeout == 0 {
+			t.Ship.Timeout = Duration(60 * time.Minute)
+		}
+		c.Targets[key] = t
+	}
+}
+
+// Validate performs cross-field validation, including the
+// must_differ_backend_from independence guardrail (SPEC §6.4).
+func (c *Config) Validate() error {
+	var errs []string
+	fail := func(format string, a ...any) { errs = append(errs, fmt.Sprintf(format, a...)) }
+
+	if c.Orchestrator.MaxParallelJobs < 1 {
+		fail("orchestrator.max_parallel_jobs must be >= 1")
+	}
+	if c.Resources.GradleSlots < 1 {
+		fail("resources.gradle_slots must be >= 1")
+	}
+	switch c.Git.CleanupWorktrees {
+	case "on_success", "always", "never":
+	default:
+		fail("git.cleanup_worktrees must be on_success|always|never, got %q", c.Git.CleanupWorktrees)
+	}
+	for name, b := range c.Backends {
+		switch b.Kind {
+		case "claude", "agy":
+		case "exec":
+			if len(b.ArgvTemplate) == 0 {
+				fail("backends.%s: kind exec requires argv_template", name)
+			}
+		default:
+			fail("backends.%s: unknown kind %q (claude|agy|exec)", name, b.Kind)
+		}
+		for _, p := range b.QuotaErrorPatterns {
+			if _, err := regexp.Compile(p); err != nil {
+				fail("backends.%s.quota_error_patterns %q: %v", name, p, err)
+			}
+		}
+	}
+	for name, a := range c.Agents {
+		if _, ok := c.Backends[a.Backend]; !ok {
+			fail("agents.%s.backend %q is not defined under backends", name, a.Backend)
+		}
+		if a.Model == "" {
+			fail("agents.%s.model must be set", name)
+		}
+	}
+	for _, sn := range AgentStates {
+		s := c.States[sn]
+		ag, ok := c.Agents[s.Agent]
+		if !ok {
+			fail("states.%s.agent %q is not defined under agents", sn, s.Agent)
+			continue
+		}
+		if s.MustDifferBackendFrom != "" {
+			other, ok := c.States[s.MustDifferBackendFrom]
+			if !ok {
+				fail("states.%s.must_differ_backend_from %q is not a configured state", sn, s.MustDifferBackendFrom)
+			} else if oag, ok := c.Agents[other.Agent]; ok && oag.Backend == ag.Backend {
+				fail("independence violation: states.%s (agent %s, backend %s) must use a different backend than states.%s (agent %s, backend %s)",
+					sn, s.Agent, ag.Backend, s.MustDifferBackendFrom, other.Agent, oag.Backend)
+			}
+		}
+	}
+	for name := range c.States {
+		found := false
+		for _, sn := range AgentStates {
+			if name == sn {
+				found = true
+				break
+			}
+		}
+		if !found {
+			fail("states.%s is not an agent state (valid: %s)", name, strings.Join(AgentStates, ", "))
+		}
+	}
+	for _, p := range c.Limits.LogErrorPatterns {
+		if _, err := regexp.Compile(p); err != nil {
+			fail("limits.log_error_patterns %q: %v", p, err)
+		}
+	}
+	for key, t := range c.Targets {
+		if t.RepoPath == "" {
+			fail("targets.%s.repo_path must be set", key)
+		}
+		if len(t.Build.Commands) == 0 {
+			fail("targets.%s.build.commands must have at least one command", key)
+		}
+		if len(t.UnitTest.Command) == 0 {
+			fail("targets.%s.unit_test.command must be set", key)
+		}
+		if t.UITest.Enabled && len(t.UITest.Command) == 0 {
+			fail("targets.%s.ui_test.command must be set when ui_test.enabled", key)
+		}
+		switch t.UITest.OnNoDevice {
+		case "skip", "fail", "wait":
+		default:
+			fail("targets.%s.ui_test.on_no_device must be skip|fail|wait", key)
+		}
+		switch t.Lint.RunIn {
+		case "building", "testing", "off":
+		default:
+			fail("targets.%s.lint.run_in must be building|testing|off", key)
+		}
+		switch t.Merge.VerifyAfterRebase {
+		case "build", "none":
+		default:
+			fail("targets.%s.merge.verify_after_rebase must be build|none", key)
+		}
+		switch t.Merge.Push {
+		case "auto", "never":
+		default:
+			fail("targets.%s.merge.push must be auto|never", key)
+		}
+		for _, pb := range c.Policies.ProtectedBranches {
+			if strings.HasPrefix(pb, t.BranchPrefix) {
+				fail("targets.%s.branch_prefix %q would produce branches shadowing protected branch %q", key, t.BranchPrefix, pb)
+			}
+		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("config invalid:\n  - %s", strings.Join(errs, "\n  - "))
+	}
+	return nil
+}
+
+// Target returns the target config for key.
+func (c *Config) Target(key string) (Target, error) {
+	t, ok := c.Targets[key]
+	if !ok {
+		keys := make([]string, 0, len(c.Targets))
+		for k := range c.Targets {
+			keys = append(keys, k)
+		}
+		return Target{}, fmt.Errorf("unknown target %q (configured: %s)", key, strings.Join(keys, ", "))
+	}
+	return t, nil
+}
+
+// AgentFor resolves the agent and backend for an agent state.
+func (c *Config) AgentFor(state string) (agentName string, ag Agent, b Backend, st State, err error) {
+	st, ok := c.States[state]
+	if !ok {
+		err = fmt.Errorf("state %s has no agent configuration", state)
+		return
+	}
+	ag, ok = c.Agents[st.Agent]
+	if !ok {
+		err = fmt.Errorf("states.%s.agent %q not found", state, st.Agent)
+		return
+	}
+	b, ok = c.Backends[ag.Backend]
+	if !ok {
+		err = fmt.Errorf("agents.%s.backend %q not found", st.Agent, ag.Backend)
+		return
+	}
+	return st.Agent, ag, b, st, nil
+}

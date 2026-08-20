@@ -1,0 +1,134 @@
+# sdlc orchestrator configuration — copy to sdlc.yaml and edit.
+# Every key shown here exists with exactly this name; omitted keys keep the
+# defaults documented in docs/SPEC.md §12. Unknown keys are rejected.
+# ${VAR} expands from the environment.
+
+orchestrator:
+  data_dir: ./data              # SQLite DB, per-job artifacts, logs
+  max_parallel_jobs: 2          # jobs progressing concurrently
+  poll_interval: 3s             # engine tick for CLI-driven changes
+  job_id_prefix: JOB            # job ids look like JOB-12
+  # lock_file: <data_dir>/engine.lock
+
+# database:
+#   path: <data_dir>/sdlc.db
+#   busy_timeout: 5s
+
+limits:
+  max_job_duration: 12h         # wall clock from submit; then TIMED_OUT
+  max_design_review_rounds: 2   # spec/plan rejection loop cap
+  max_code_review_rounds: 3
+  max_fix_attempts: 3           # shared fix budget across all fix loops
+  max_flake_retries: 2
+  flake_rerun_count: 3          # deterministic reruns that decide "flaky"
+  max_agent_retries: 2          # per-state post-condition retry cap
+  max_release_retries: 3
+  release_retry_backoff: 10m
+  max_agent_invocations_per_job: 40
+  log_excerpt_lines: 200        # failure-log tail fed to the analysis agent
+
+resources:
+  gradle_slots: 1               # concurrent build/test invocations, all jobs
+  devices:
+    serials: []                 # explicit adb serials for the UI-test pool
+    discover: true              # add `adb devices` results to the pool
+    adb_binary: adb
+    acquire_timeout: 10m
+    boot_emulator:
+      enabled: false
+      avd_name: ""
+      emulator_binary: emulator
+      boot_timeout: 6m
+      headless: true
+      kill_after_job: true
+
+backends:
+  claude:
+    binary: C:\Users\vm899\.local\bin\claude.exe
+    default_timeout: 30m
+    permission_mode: bypassPermissions   # safe: agents only run inside job worktrees
+    quota_backoff: 30m            # BLOCKED_ON_QUOTA suspension on rate limits
+    # expected_version: "2.1.0"   # non-empty => sdlc validate warns on drift
+  agy:
+    binary: C:\Users\vm899\AppData\Local\agy\bin\agy.exe
+    default_timeout: 30m
+    permission_mode: skip         # --dangerously-skip-permissions: agy soft-denies
+                                  # shell in headless mode otherwise; agents only
+                                  # run inside job worktrees. "default" to disable.
+    print_timeout: 50m            # must exceed the longest agy state timeout
+    settings_file: ${USERPROFILE}/.gemini/antigravity-cli/settings.json
+    ensure_permissions: []        # grants sdlc validate checks for (headless soft-deny guard)
+    assert_model: true            # fail the state if agy silently ran another model
+
+agents:
+  opus:   { backend: claude, model: opus,   effort: high }
+  sonnet: { backend: claude, model: sonnet }
+  # agy model ids embed the effort level (see `agy models`); pick e.g.
+  # gemini-3.1-pro-high for maximum quality instead.
+  gemini: { backend: agy,    model: gemini-3.7-flash-medium }
+
+# Per-state agent mapping. Review/analyze states keep Write (they must emit
+# their .sdlc output file — any source-tree edit is mechanically discarded and
+# fails the state) but lose Edit/Bash; the diff under review is pre-staged by
+# the orchestrator. CODE_REVIEW and FINAL_REVIEW must run on a different
+# backend than IMPLEMENTING (asserted at startup).
+states:
+  PLANNING:      { agent: opus,   timeout: 30m }
+  DESIGN_REVIEW: { agent: sonnet, timeout: 15m, disallowed_tools: [Edit, NotebookEdit, Bash] }
+  IMPLEMENTING:  { agent: gemini, timeout: 45m }
+  CODE_REVIEW:   { agent: opus,   timeout: 20m, disallowed_tools: [Edit, NotebookEdit, Bash], must_differ_backend_from: IMPLEMENTING }
+  ANALYZING:     { agent: sonnet, timeout: 10m, disallowed_tools: [Edit, NotebookEdit, Bash] }
+  FIXING:        { agent: gemini, timeout: 45m }
+  FINAL_REVIEW:  { agent: opus,   timeout: 20m, disallowed_tools: [Edit, NotebookEdit, Bash], must_differ_backend_from: IMPLEMENTING }
+  # Each state also accepts: prompt: path/to/custom_prompt.md (overrides the
+  # embedded default template for that state).
+
+policies:
+  protected_branches: [main, master]
+  protect_tests_on_code_bug_fix: true   # FIXING may not touch tests when the failure was a code bug
+  test_file_globs:
+    - "**/src/test/**"
+    - "**/src/androidTest/**"
+    - "**/*Test.kt"
+    - "**/*Test.java"
+  reviewer_diff_must_be_empty: true
+
+git:
+  cleanup_worktrees: on_success  # on_success | always | never
+  delete_branch_on_success: false
+
+targets:
+  expensetracker:
+    repo_path: C:\Users\vm899\repos\ExpenseTracker
+    default_branch: main
+    branch_prefix: sdlc/
+    # worktrees_dir: <repo_path>/.worktrees
+    gradle:
+      isolated_user_home: false  # true => per-job GRADLE_USER_HOME (slow first build)
+    build:
+      commands:
+        - ["gradlew.bat", ":app:assembleDebug"]
+      timeout: 30m
+    unit_test:
+      command: ["gradlew.bat", ":app:testDebugUnitTest"]
+      timeout: 30m
+    lint:
+      command: ["gradlew.bat", ":app:lintRelease"]
+      run_in: "off"              # building | testing | off
+      timeout: 20m
+    ui_test:
+      enabled: true
+      command: ["gradlew.bat", ":app:connectedDebugAndroidTest"]
+      timeout: 40m
+      on_no_device: skip         # skip | fail | wait
+    merge:
+      rebase_before_merge: true
+      verify_after_rebase: build # build | none
+      push: auto                 # auto (push if a remote exists) | never
+    ship:
+      # dry-run by default — switch to ["autoship", "run", ...] deliberately
+      # once the pipeline has earned trust.
+      command: ["autoship", "dry-run", "--config", "autoship.yaml"]
+      resume_command: ["autoship", "resume", "--config", "autoship.yaml"]
+      auto_resume_halt: true     # clear autoship's sticky halt before a retry
+      timeout: 60m

@@ -1,0 +1,13 @@
+# The built binary, at the repo root only — an unanchored `sdlc` would also
+# match the cmd/sdlc/ package directory and quietly drop it from the repo.
+/sdlc
+/sdlc.exe
+
+# Runtime state: the SQLite DB, per-job artifacts and logs. Never versioned.
+/data
+
+# The local config is a copy of sdlc.example.yaml with machine-specific paths
+# (repo checkouts, agent binaries) in it. The example is the versioned one.
+/sdlc.yaml
+
+.idea
