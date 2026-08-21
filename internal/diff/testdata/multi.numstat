@@ -1,0 +1,5 @@
+1	1	a.txt
+1	0	b.txt
+0	6	c.txt
+0	0	d_old.txt => d_new.txt
+2	0	e.txt

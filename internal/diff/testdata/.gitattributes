@@ -1,0 +1,6 @@
+# Fixtures are exact bytes captured from git, not text to be normalised.
+# Without this the repo-wide `* text=auto eol=lf` would rewrite crlf.patch and
+# crlf_endings.patch on checkout and the two cases they exist to separate would
+# become the same file.
+*.patch   -text
+*.numstat -text

@@ -1,0 +1,20 @@
+diff --git a/before.txt b/after.txt
+similarity index 77%
+rename from before.txt
+rename to after.txt
+index e63706e..325f99b 100644
+--- a/before.txt
++++ b/after.txt
+@@ -1,4 +1,4 @@
+ alpha
+ bravo
+-charlie
++CHARLIE
+ delta
+ echo
+ foxtrot
+ golf
+ hotel
+-india
++INDIA
+ juliet

@@ -1,0 +1,10 @@
+diff --cc conflict.txt
+index ba2906d,2299c37..0000000
+--- a/conflict.txt
++++ b/conflict.txt
+@@@ -1,1 -1,1 +1,5 @@@
+++<<<<<<< HEAD
+ +main
+++=======
++ side
+++>>>>>>> side

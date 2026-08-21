@@ -1,0 +1,11 @@
+diff --git a/unrelated.txt b/unrelated.txt
+index 1111111..2222222 100644
+--- a/unrelated.txt
++++ b/unrelated.txt
+@@ -1,4 +1,4 @@
+ head
+-the quick brown fox jumps
++zzz
+-shared_prefix_and_suffix_XX_tail
++shared_prefix_and_suffix_YY_tail
+ tail

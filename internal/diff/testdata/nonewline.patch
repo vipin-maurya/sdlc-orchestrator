@@ -1,0 +1,30 @@
+diff --git a/gains.txt b/gains.txt
+index 4cb29ea..54d55bf 100644
+--- a/gains.txt
++++ b/gains.txt
+@@ -1,3 +1,3 @@
+ one
+ two
+-three
++three
+\ No newline at end of file
+diff --git a/loses.txt b/loses.txt
+index 04ec35a..661264d 100644
+--- a/loses.txt
++++ b/loses.txt
+@@ -1,3 +1,3 @@
+ x
+ y
+-z
++Z
+diff --git a/tail.txt b/tail.txt
+index a2f0ef4..5261879 100644
+--- a/tail.txt
++++ b/tail.txt
+@@ -1,3 +1,3 @@
+ alpha
+ bravo
+-charlie
+\ No newline at end of file
++CHARLIE
+\ No newline at end of file
