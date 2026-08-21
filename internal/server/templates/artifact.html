@@ -1,1 +1,54 @@
-{{define "content"}}{{end}}
+{{/* One artifact (spec §5.1). Owner: W2-H.
+
+     A review/1 artifact is rendered as findings because that is the shape a
+     human reads one in: severity first, then whether the verifiers upheld it.
+     The pretty-printed object is still below it — the findings view is a
+     reading aid, not a replacement for the record. */}}
+{{define "content"}}
+{{with .Body}}
+<h1><a href="/jobs/{{.Job.ID}}">{{.Job.ID}}</a> / <a href="/jobs/{{.Job.ID}}/artifacts">artifacts</a> / {{.Name}}</h1>
+<p class="muted">{{.Path}} — {{.Size}} bytes</p>
+
+{{if .Trimmed}}
+<p class="banner warn">Truncated: only the first 8 MiB of this file is shown, and it is
+  shown unformatted. The whole file is on disk at <code>{{.Path}}</code>.</p>
+{{end}}
+
+{{with .Review}}
+<h2>Review of the {{.Reviewed}}</h2>
+<p>{{.Summary}}</p>
+{{end}}
+
+{{if .Findings}}
+<h2>Findings ({{len .Findings}})</h2>
+{{range .Findings}}
+<div class="doc">
+  <h3><span class="badge {{.Severity}}">{{.Severity}}</span> {{.ID}}{{if .File}} — {{.File}}{{end}}</h3>
+  <p>{{.Description}}</p>
+  {{if .Recommendation}}<p><em>Recommendation:</em> {{.Recommendation}}</p>{{end}}
+  {{with .Verification}}
+    <p>Verification: {{.Confirmed}} confirmed / {{.Refuted}} refuted of {{.Votes}} votes,
+      {{.MinConfirm}} needed —
+      {{if .Survived}}<strong>survived</strong>{{else}}<strong>set aside</strong>{{end}}{{if .OriginalSeverity}},
+      originally {{.OriginalSeverity}}{{end}}.</p>
+    {{if .Verdicts}}
+    <table>
+      <thead><tr><th>Verdict</th><th>Evidence</th><th>Reasoning</th></tr></thead>
+      <tbody>
+      {{range .Verdicts}}
+        <tr><td>{{.Verdict}}</td><td>{{.Evidence}}</td><td>{{.Reasoning}}</td></tr>
+      {{end}}
+      </tbody>
+    </table>
+    {{end}}
+  {{end}}
+</div>
+{{end}}
+{{else if .Review}}
+<p class="muted">This review recorded no findings.</p>
+{{end}}
+
+<h2>{{if .IsJSON}}JSON{{else}}Contents{{end}}</h2>
+<pre>{{.Pretty}}</pre>
+{{end}}
+{{end}}

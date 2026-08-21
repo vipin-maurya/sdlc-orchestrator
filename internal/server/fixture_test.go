@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vipinm/sdlc-orchestrator/internal/artifact"
 	"github.com/vipinm/sdlc-orchestrator/internal/config"
 	"github.com/vipinm/sdlc-orchestrator/internal/store"
 
@@ -91,6 +92,14 @@ func (e *env) freshToken() string {
 // job inserts a job already sitting in state.
 func (e *env) job(state, title string) *store.Job {
 	e.t.Helper()
+	j := e.newJobRow(state, title)
+	e.layout(j)
+	return j
+}
+
+// newJobRow inserts the database row and nothing else.
+func (e *env) newJobRow(state, title string) *store.Job {
+	e.t.Helper()
 	id, err := e.st.NextJobID("JOB")
 	if err != nil {
 		e.t.Fatal(err)
@@ -110,6 +119,41 @@ func (e *env) job(state, title string) *store.Job {
 		}
 	}
 	return j
+}
+
+// bareJob is a job row with nothing on disk: a job that has just been created,
+// or one whose data directory was cleaned up underneath it. The pages have to
+// stay readable in that state, so one helper produces it deliberately rather
+// than tests depending on job() having happened not to write anything.
+func (e *env) bareJob(state, title string) *store.Job {
+	e.t.Helper()
+	return e.newJobRow(state, title)
+}
+
+// layout writes the on-disk directories and one sample file in each.
+//
+// It is part of the default fixture rather than an opt-in because safeName
+// resolves a {name} route by membership in the directory listing: a job with no
+// directories makes every logs/artifacts/prompts request a truthful 404, which
+// reads in a route test as "the route is not registered" — which is exactly how
+// three registered routes came to look unregistered.
+func (e *env) layout(j *store.Job) {
+	e.t.Helper()
+	if err := artifact.EnsureLayout(e.cfg.Orchestrator.DataDir, j.ID, j.IssueTitle, j.IssueBody); err != nil {
+		e.t.Fatal(err)
+	}
+	for path, body := range map[string]string{
+		filepath.Join(artifact.LogsDir(e.cfg.Orchestrator.DataDir, j.ID), "build.log"):      "building\ndone\n",
+		filepath.Join(artifact.ArtifactsDir(e.cfg.Orchestrator.DataDir, j.ID), "spec.json"): `{"schema":"spec/1","summary":"a spec"}`,
+		filepath.Join(artifact.PromptsDir(e.cfg.Orchestrator.DataDir, j.ID), "planning.md"): "plan the thing\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			e.t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			e.t.Fatal(err)
+		}
+	}
 }
 
 // do sends req without following redirects: a 303 is the assertion in several

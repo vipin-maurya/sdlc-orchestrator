@@ -1,1 +1,34 @@
-{{define "content"}}{{end}}
+{{/* One log file (spec §5.1, bounds §5.4). Owner: W2-H.
+
+     The banners are not decoration. A log page that silently showed the last
+     2000 lines of a 40 000-line failure would let a reader conclude the run
+     started where the page starts, so every view that is not the whole file
+     says so and names the path the whole file is at.
+
+     #logtail and #follow are the hooks app.js polls through (plan §2.7):
+     data-url is the log's own URL and data-offset is where the shown bytes
+     end, which is what ?from= is asked for next. */}}
+{{define "content"}}
+{{with .Body}}
+<h1><a href="/jobs/{{.Job.ID}}">{{.Job.ID}}</a> / <a href="/jobs/{{.Job.ID}}/logs">logs</a> / {{.Name}}</h1>
+<p class="muted">{{.Path}} — {{.Size}} bytes, modified
+  <time datetime="{{rfc3339 .ModTime}}">{{rfc3339 .ModTime}}</time></p>
+
+{{if .ByteTruncated}}
+<p class="banner warn">Truncated: this is the last 8 MiB of a {{.Size}}-byte file,
+  starting at the first whole line inside that window. The whole file is on disk at
+  <code>{{.Path}}</code>.</p>
+{{end}}
+{{if .LineTruncated}}
+<p class="banner warn">Showing the last {{.Lines}} lines{{if .TotalLines}} of {{.TotalLines}}{{end}}.
+  <a href="{{.FollowURL}}?all=1">Show the whole file</a> (bounded at 8 MiB).</p>
+{{else if .All}}
+<p class="banner">Showing the whole file{{if .TotalLines}} — {{.TotalLines}} lines{{end}}.
+  <a href="{{.FollowURL}}">Back to the last 2000 lines</a>.</p>
+{{end}}
+
+<p><label><input id="follow" type="checkbox"> Follow</label></p>
+
+<pre id="logtail" data-url="{{.FollowURL}}" data-offset="{{.Offset}}">{{.Text}}</pre>
+{{end}}
+{{end}}

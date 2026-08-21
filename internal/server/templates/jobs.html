@@ -1,1 +1,47 @@
-{{define "content"}}{{end}}
+{{/* The job list (spec §5.1). Owner: W2-H.
+
+     "Waiting on you" is a separate block rather than a sort key: the whole
+     point of the page is that a job needing a decision is not allowed to fall
+     below one that does not merely because something else was touched later.
+
+     The data-job / data-field hooks are the contract app.js replaces rows
+     through (plan §2.7). Times are emitted as RFC3339 in a <time datetime>
+     and turned into "4m ago" in the browser: a relative time rendered on the
+     server is wrong by the time it is read, and the reader may be on the far
+     end of an ssh -L in another timezone. */}}
+{{define "jobtable"}}
+<table>
+  <thead><tr><th>Job</th><th>Target</th><th>State</th><th>Since</th><th>Title</th><th>Gate</th></tr></thead>
+  <tbody>
+  {{range .}}
+    <tr data-job="{{.Job.ID}}">
+      <td><a href="/jobs/{{.Job.ID}}">{{.Job.ID}}</a></td>
+      <td>{{.Job.Target}}</td>
+      <td data-field="state">{{.Job.State}}</td>
+      <td data-field="since"><time datetime="{{rfc3339 .Job.StateEnteredAt}}">{{rfc3339 .Job.StateEnteredAt}}</time></td>
+      <td data-field="title">{{.Job.IssueTitle}}</td>
+      <td data-field="gate">{{if .Gate}}<span class="badge gate">{{.Gate}}</span>{{end}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+
+{{define "content"}}
+<h1>Jobs</h1>
+{{with .Body}}
+  <h2>Waiting on you</h2>
+  {{if .Waiting}}
+    {{template "jobtable" .Waiting}}
+  {{else}}
+    <p class="muted">Nothing is waiting for a decision.</p>
+  {{end}}
+
+  <h2>Everything else</h2>
+  {{if .Rest}}
+    {{template "jobtable" .Rest}}
+  {{else}}
+    <p class="muted">No other jobs. <a href="/submit">Submit one</a>.</p>
+  {{end}}
+{{end}}
+{{end}}

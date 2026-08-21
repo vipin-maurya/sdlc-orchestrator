@@ -1,1 +1,47 @@
-{{define "content"}}{{end}}
+{{/* The event timeline (spec §5.1). Owner: W2-H.
+
+     Newest last, matching `sdlc events`: the two surfaces are read by the same
+     person about the same job, and a reversed order is a way to misread which
+     event came after which. */}}
+{{define "content"}}
+{{with .Body}}
+<h1><a href="/jobs/{{.Job.ID}}">{{.Job.ID}}</a> events</h1>
+<p class="muted">{{len .Events}} of {{.Total}} events shown.</p>
+
+<p>
+  Kind:
+  <a href="/jobs/{{.Job.ID}}/events{{if .State}}?state={{.State}}{{end}}">all</a>
+  {{range $k := .Kinds}}
+    · <a href="/jobs/{{$.Body.Job.ID}}/events?kind={{$k}}{{if $.Body.State}}&amp;state={{$.Body.State}}{{end}}">{{$k}}</a>
+  {{end}}
+</p>
+<p>
+  State:
+  <a href="/jobs/{{.Job.ID}}/events{{if .Kind}}?kind={{.Kind}}{{end}}">all</a>
+  {{range $s := .States}}
+    · <a href="/jobs/{{$.Body.Job.ID}}/events?state={{$s}}{{if $.Body.Kind}}&amp;kind={{$.Body.Kind}}{{end}}">{{$s}}</a>
+  {{end}}
+</p>
+
+{{if .Events}}
+<table>
+  <thead><tr><th>Time</th><th>State</th><th>Kind</th><th>Agent</th><th>Exit</th><th>Duration</th><th>Detail</th></tr></thead>
+  <tbody>
+  {{range .Events}}
+    <tr>
+      <td><time datetime="{{rfc3339 .Event.CreatedAt}}">{{rfc3339 .Event.CreatedAt}}</time></td>
+      <td>{{.Event.State}}</td>
+      <td>{{.Event.Kind}}</td>
+      <td>{{.Event.Agent}}{{if .Event.Model}} ({{.Event.Model}}){{end}}</td>
+      <td class="num">{{.Exit}}</td>
+      <td class="num">{{.Dur}}</td>
+      <td>{{if .Detail}}<details><summary>detail</summary><pre>{{.Detail}}</pre></details>{{end}}</td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{else}}
+<p class="muted">No events match.</p>
+{{end}}
+{{end}}
+{{end}}

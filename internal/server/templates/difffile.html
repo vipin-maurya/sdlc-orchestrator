@@ -1,1 +1,123 @@
-{{define "content"}}{{end}}
+{{/* One file's diff, full page (spec §5.1). Owner: W2-K.
+
+     This is where a file too large to render inline is read, so nothing here
+     is bounded by the page budget: the stub on /jobs/{id}/diff links here
+     precisely because it refused to render the file itself, and a second
+     refusal would leave the reader with nowhere to go.
+
+     The escaping rule is diff.html's and is not relaxed by the file being
+     alone on the page. */}}
+
+{{define "content"}}
+{{with .Body}}
+{{$id := .Job.ID}}
+<h1>{{if .Files}}{{(index .Files 0).Path}}{{else}}Diff{{end}}</h1>
+
+<p class="muted">
+  <a href="/jobs/{{$id}}">job</a> ·
+  <a href="/jobs/{{$id}}/diff">all files</a> ·
+  <a href="/jobs/{{$id}}/diff.patch">raw patch</a>
+</p>
+
+{{template "diffBanners" .}}
+
+<div class="diff-toolbar">
+  <a class="diff-view{{if not .Split}} on{{end}}" href="?view=unified">unified</a>
+  <a class="diff-view{{if .Split}} on{{end}}" href="?view=split">side-by-side</a>
+</div>
+{{template "diffViewToggle" .Toggle}}
+
+{{range .Files}}
+<div class="dfile open" id="file-{{.Index}}">
+  <div class="summary">
+    <span class="dpath">{{if .Renamed}}{{.OldPath}} → {{.NewPath}}{{else}}{{.Path}}{{end}}</span>
+    {{template "fileBadges" .}}
+    <span class="counts"><span class="add">+{{.Adds}}</span> <span class="del">−{{.Dels}}</span></span>
+  </div>
+  {{template "diffFileBody" .}}
+</div>
+{{end}}
+{{end}}
+{{end}}
+
+{{/* --- shared pieces, the copy of diff.html's -------------------------
+
+     html/template gives each page its own namespace, so diff.html's
+     definitions are not visible here and these are its copies. Any change to
+     one must be made to both — they are two renderings that must not come to
+     disagree about the same patch. */}}
+
+{{define "diffBanners"}}
+{{if .Truncated}}
+<p class="banner bad">This patch was cut off at the 4 MiB capture limit — what
+follows is its head, not the whole change. Anything below the cut is not on this
+page at all. Read the full diff with git before approving anything from it.</p>
+{{end}}
+{{if .Note}}
+<p class="banner warn">{{.Note}}</p>
+{{end}}
+{{if .ParseErr}}
+<p class="banner bad">The patch could not be parsed: {{.ParseErr}}. The raw
+patch is still available.</p>
+{{end}}
+{{if and .Empty (not .Note)}}
+<p class="banner">This job's diff against its base is empty — nothing has
+changed on the branch yet.</p>
+{{end}}
+{{if .Stubs}}
+<p class="banner warn">This patch is larger than the page renders at once, so
+the last {{.Stubs}} file{{if ne .Stubs 1}}s are{{else}} is{{end}} shown as a
+stub. Open a stub to read that file on its own page.</p>
+{{end}}
+{{end}}
+
+{{define "fileBadges"}}
+<span class="badge status {{.Status}}">{{.Status}}</span>
+{{if .Binary}}<span class="badge">binary</span>{{end}}
+{{if .ModeOnly}}<span class="badge">{{.OldMode}} → {{.NewMode}}</span>{{end}}
+{{if .Malformed}}<span class="badge bad">malformed</span>{{end}}
+{{end}}
+
+{{define "diffFileBody"}}
+{{if .Malformed}}
+<p class="banner bad">This file was only partly understood: {{.Malformed}}. No
+line was dropped to make the numbers agree, so what is shown is everything the
+patch contained — but check it against the raw patch before relying on it.</p>
+{{end}}
+{{if .Stub}}
+<p class="stub">{{.Rows}} lines — too much to render alongside everything else
+on this page. Open it on its own page with the link above.</p>
+{{else if .Binary}}
+<p class="stub">Binary file changed. Nothing is rendered because nothing here
+would be readable.</p>
+{{else if not .Hunks}}
+<p class="stub">No content changed in this file.</p>
+{{else}}
+{{$split := .Split}}{{range .Hunks}}
+<table class="dtable">
+  <tbody>
+    <tr class="hunk"><td colspan="4"><span class="hh">{{.Header}}</span> {{.Section}}</td></tr>
+    {{if $split}}
+      {{range .Rows}}
+      <tr>
+        <td class="ln {{.Left.Class}}">{{.Left.No}}</td>
+        <td class="tx {{.Left.Class}}">{{if .Left.Has}}{{.Left.Pre}}{{if .Left.Mark}}<span class="mark">{{.Left.Mark}}</span>{{end}}{{.Left.Post}}{{if .Left.NoNewline}}<span class="nonl">no newline at end of file</span>{{end}}{{end}}</td>
+        <td class="ln {{.Right.Class}}">{{.Right.No}}</td>
+        <td class="tx {{.Right.Class}}">{{if .Right.Has}}{{.Right.Pre}}{{if .Right.Mark}}<span class="mark">{{.Right.Mark}}</span>{{end}}{{.Right.Post}}{{if .Right.NoNewline}}<span class="nonl">no newline at end of file</span>{{end}}{{end}}</td>
+      </tr>
+      {{end}}
+    {{else}}
+      {{range .Lines}}
+      <tr class="{{.Class}}">
+        <td class="ln">{{.Old}}</td>
+        <td class="ln">{{.New}}</td>
+        <td class="sg">{{.Sign}}</td>
+        <td class="tx">{{.Text}}{{if .NoNewline}}<span class="nonl">no newline at end of file</span>{{end}}</td>
+      </tr>
+      {{end}}
+    {{end}}
+  </tbody>
+</table>
+{{end}}
+{{end}}
+{{end}}

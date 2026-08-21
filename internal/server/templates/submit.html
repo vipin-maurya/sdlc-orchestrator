@@ -1,1 +1,33 @@
-{{define "content"}}{{end}}
+{{/* The new-job form (spec §5.1, §10). Owner: W2-H.
+
+     The form posts the four fields §5.2 pins and nothing else; every rule about
+     what a valid submission is lives in internal/jobs, so this page must not
+     grow a second opinion about it. The hidden csrf input is not optional —
+     without it the POST is refused (AC-11). */}}
+{{define "content"}}
+<h1>Submit a job</h1>
+{{with .Body}}
+{{if .Targets}}
+<form class="decision" method="post" action="/submit">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <label for="target">Target</label>
+  <select id="target" name="target">
+    {{range .Targets}}<option value="{{.}}">{{.}}</option>{{end}}
+  </select>
+
+  <label for="title">Title</label>
+  <input id="title" type="text" name="title" autocomplete="off">
+
+  <label for="body">Body — or paste an issue file here</label>
+  <textarea id="body" name="body"></textarea>
+  <p class="muted">Leave the title blank and the first line of the body, stripped of a
+    leading <code>#</code>, becomes it — the same rule <code>sdlc submit --file</code> uses.</p>
+
+  <button class="primary" type="submit">Submit</button>
+</form>
+{{else}}
+<p class="banner warn">The loaded config defines no targets, so there is nothing to
+  submit a job against. See <a href="/config">the config page</a>.</p>
+{{end}}
+{{end}}
+{{end}}

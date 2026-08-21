@@ -1,1 +1,81 @@
-{{define "content"}}{{end}}
+{{/* Job detail (spec §5.1). Owner: W2-H.
+
+     Counters, hold reason and resume-after are printed as facts with no
+     interpretation: the engine decides what they mean, and a page that
+     paraphrased them would be a second opinion about a job's state. */}}
+{{define "content"}}
+{{with .Body}}
+<h1>{{.Job.ID}} <span class="badge">{{.Job.State}}</span>
+  {{if .Gate}}<span class="badge gate">{{.Gate}}</span>{{end}}</h1>
+<p>{{.Job.IssueTitle}}</p>
+
+{{if .Gate}}
+<p class="banner warn">This job is waiting for a decision at the
+  <strong>{{.Gate}}</strong> gate. <a href="/jobs/{{.Job.ID}}/gate">Read what is being decided</a>.</p>
+{{/* The forms themselves are W2-I's named templates, rendered from the
+     FormModel this page carries. The hold gate gets resume/cancel rather than
+     approve/reject: a held job is not waiting for a judgement about a
+     document, it is waiting to be told what to do next. */}}
+{{if eq .Gate "hold"}}{{template "holdForm" .Form}}{{else}}{{template "decisionForm" .Form}}{{end}}
+{{end}}
+
+{{if .Job.HoldReason}}
+<p class="banner bad">Held: {{.Job.HoldReason}}</p>
+{{end}}
+
+<dl class="facts">
+  <dt>target</dt><dd>{{.Job.Target}}</dd>
+  <dt>repo</dt><dd>{{.Target.RepoPath}}</dd>
+  <dt>default branch</dt><dd>{{.Target.DefaultBranch}}</dd>
+  <dt>branch</dt><dd>{{.Job.Branch}}</dd>
+  <dt>worktree</dt><dd>{{.Job.WorktreePath}}</dd>
+  <dt>state</dt><dd>{{.Job.State}}{{if .Job.PrevState}} (from {{.Job.PrevState}}){{end}}</dd>
+  <dt>since</dt><dd><time datetime="{{rfc3339 .Job.StateEnteredAt}}">{{rfc3339 .Job.StateEnteredAt}}</time></dd>
+  <dt>updated</dt><dd><time datetime="{{rfc3339 .Job.UpdatedAt}}">{{rfc3339 .Job.UpdatedAt}}</time></dd>
+  <dt>created</dt><dd><time datetime="{{rfc3339 .Job.CreatedAt}}">{{rfc3339 .Job.CreatedAt}}</time></dd>
+  <dt>head</dt><dd>{{short .Job.HeadSHA}}</dd>
+  <dt>base</dt><dd>{{short .Job.Counters.BaseSHA}}</dd>
+  {{if not .Job.ResumeAfter.IsZero}}
+  <dt>resume after</dt><dd><time datetime="{{rfc3339 .Job.ResumeAfter}}">{{rfc3339 .Job.ResumeAfter}}</time></dd>
+  {{end}}
+  <dt>hold reason</dt><dd>{{if .Job.HoldReason}}{{.Job.HoldReason}}{{else}}—{{end}}</dd>
+  <dt>artifacts dir</dt><dd>{{.ArtifactsDir}}</dd>
+  <dt>logs dir</dt><dd>{{.LogsDir}}</dd>
+  <dt>prompts dir</dt><dd>{{.PromptsDir}}</dd>
+</dl>
+
+<h2>Counters</h2>
+<dl class="facts">
+  <dt>design review rounds</dt><dd>{{.Job.Counters.DesignReviewRounds}}</dd>
+  <dt>code review rounds</dt><dd>{{.Job.Counters.CodeReviewRounds}}</dd>
+  <dt>fix attempts</dt><dd>{{.Job.Counters.FixAttempts}}</dd>
+  <dt>flake retries</dt><dd>{{.Job.Counters.FlakeRetries}}</dd>
+  <dt>agent retries</dt><dd>{{.Job.Counters.AgentRetries}}</dd>
+  <dt>release retries</dt><dd>{{.Job.Counters.ReleaseRetries}}</dd>
+  <dt>agent invocations</dt><dd>{{.Job.Counters.AgentInvocations}}</dd>
+  {{if .Job.Counters.FailedPhase}}<dt>failed phase</dt><dd>{{.Job.Counters.FailedPhase}}</dd>{{end}}
+  {{if .Job.Counters.LastAnalysis}}<dt>last analysis</dt><dd>{{.Job.Counters.LastAnalysis}}</dd>{{end}}
+</dl>
+
+<h2>Running</h2>
+{{if .LastProgress}}
+<p><strong>{{.LastProgress.State}}</strong>
+  <time datetime="{{rfc3339 .LastProgress.CreatedAt}}">{{rfc3339 .LastProgress.CreatedAt}}</time></p>
+<pre>{{.Progress}}</pre>
+{{else}}
+<p class="muted">No progress event has been recorded for this job.</p>
+{{end}}
+
+<h2>Elsewhere</h2>
+<ul>
+  {{if .Gate}}<li><a href="/jobs/{{.Job.ID}}/gate">Gate document</a></li>{{end}}
+  <li><a href="/jobs/{{.Job.ID}}/diff">Diff</a> (<a href="/jobs/{{.Job.ID}}/diff.patch">raw patch</a>)</li>
+  <li><a href="/jobs/{{.Job.ID}}/events">Events</a> ({{.Events}})</li>
+  <li><a href="/jobs/{{.Job.ID}}/logs">Logs</a></li>
+  <li><a href="/jobs/{{.Job.ID}}/artifacts">Artifacts</a></li>
+</ul>
+
+<h2>Issue</h2>
+<pre>{{.Job.IssueBody}}</pre>
+{{end}}
+{{end}}

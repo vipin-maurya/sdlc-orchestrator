@@ -1,1 +1,25 @@
-{{define "content"}}{{end}}
+{{/* The artifact directory listing (spec §5.1). Owner: W2-H. */}}
+{{define "content"}}
+{{with .Body}}
+<h1><a href="/jobs/{{.Job.ID}}">{{.Job.ID}}</a> artifacts</h1>
+<p class="muted">{{.Dir}}</p>
+{{if .Missing}}
+<p class="banner">This job has no artifact directory yet.</p>
+{{else if not .Files}}
+<p class="muted">The directory is empty.</p>
+{{else}}
+<table>
+  <thead><tr><th>Name</th><th>Bytes</th><th>Modified</th></tr></thead>
+  <tbody>
+  {{range .Files}}
+    <tr>
+      <td><a href="{{.Href}}">{{.Name}}</a></td>
+      <td class="num">{{.Size}}</td>
+      <td><time datetime="{{rfc3339 .ModTime}}">{{rfc3339 .ModTime}}</time></td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+{{end}}
+{{end}}

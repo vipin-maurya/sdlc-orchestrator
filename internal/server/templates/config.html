@@ -1,1 +1,39 @@
-{{define "content"}}{{end}}
+{{/* The read-only config (spec §5.1, §2.2). Owner: W2-H.
+
+     Read-only means there is no form on this page at all. The config decides
+     which backend reviews which state and what the release command is; it is
+     edited in a file, validated at load, and shown here as the thing that was
+     actually loaded — which is not always the same as the thing on disk, since
+     defaults are filled in and ${VAR} is expanded before this struct exists.
+
+     That expansion is also why the YAML below is redacted rather than printed:
+     a token that was a ${VAR} in the file is a token in the loaded struct. */}}
+{{define "content"}}
+<h1>Config</h1>
+{{with .Body}}
+<p class="banner">This page is read-only. The config is edited in a file and validated
+  at load; nothing here writes anything.</p>
+
+{{if .Redacted}}
+<p class="banner warn">Values that name or look like a credential have been replaced with
+  <code>[redacted]</code>. The unredacted values are in the config file and in the
+  environment it was expanded from.</p>
+{{else}}
+<p class="muted">Nothing in the loaded config looked like a credential; any value that
+  did would be shown as <code>[redacted]</code>.</p>
+{{end}}
+
+<h2>Resolved paths</h2>
+<dl class="facts">
+  <dt>config file</dt><dd>{{if .Path}}{{.Path}}{{else}}(none — built-in defaults){{end}}</dd>
+  <dt>data dir</dt><dd>{{.DataDir}}</dd>
+  <dt>jobs dir</dt><dd>{{.JobsDir}}</dd>
+  <dt>database</dt><dd>{{.DBPath}}</dd>
+  <dt>lock file</dt><dd>{{.LockFile}}</dd>
+  <dt>server listen</dt><dd>{{if .Listen}}{{.Listen}}{{else}}(unset){{end}}</dd>
+</dl>
+
+<h2>Loaded config as YAML</h2>
+<pre>{{.YAML}}</pre>
+{{end}}
+{{end}}

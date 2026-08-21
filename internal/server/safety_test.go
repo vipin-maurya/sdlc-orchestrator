@@ -283,13 +283,36 @@ func TestStaleStateNeverReachesTheHandler(t *testing.T) {
 	e := newEnv(t)
 	j := e.job("AWAITING_MERGE_APPROVAL", "t")
 
+	// A fresh decision must reach the handler and write its row. This half is
+	// what stops the test passing for the wrong reason: without it, a
+	// requireFreshState that refused everything would satisfy the stale case
+	// below and look correct.
 	fresh := e.post("/jobs/"+j.ID+"/approve", url.Values{"state": {"AWAITING_MERGE_APPROVAL"}})
-	if fresh.StatusCode != http.StatusNotImplemented {
-		t.Fatalf("a fresh decision = %d; it should have reached the handler stub (501)", fresh.StatusCode)
+	if fresh.StatusCode != http.StatusSeeOther {
+		t.Fatalf("a fresh decision = %d, want 303; it should have reached the handler", fresh.StatusCode)
 	}
+	if n := len(e.approvals()); n != 1 {
+		t.Fatalf("a fresh decision wrote %d approval rows, want 1", n)
+	}
+	// Consume it before testing staleness. A pending row makes the next
+	// decision a 409 on its own (AC-14), which is the same status staleness
+	// produces — leaving it would let this test pass without the state
+	// comparison ever running.
+	pending, err := e.st.PendingApproval(j.ID, "merge")
+	if err != nil || pending == nil {
+		t.Fatalf("no pending approval to consume: %v", err)
+	}
+	if err := e.st.ConsumeApproval(pending.ID); err != nil {
+		t.Fatal(err)
+	}
+	before := len(e.approvals())
 
-	// The job moves the way it would while a tab sat open on the gate page.
-	j.State = "MERGING"
+	// The job moves to another state that ALSO has an approval gate. Moving it
+	// to a gateless state (MERGING, say) would make this pass without the
+	// comparison ever running: approvalGate refuses a state with no gate, and
+	// its refusal is a 409 too. Verified — with the state comparison disabled
+	// and MERGING here, this test still passed.
+	j.State = "AWAITING_RELEASE_APPROVAL"
 	if err := e.st.UpdateJob(j); err != nil {
 		t.Fatal(err)
 	}
@@ -297,11 +320,13 @@ func TestStaleStateNeverReachesTheHandler(t *testing.T) {
 	if stale.StatusCode != http.StatusConflict {
 		t.Fatalf("a stale decision = %d, want 409", stale.StatusCode)
 	}
-	if body := e.body(stale); !strings.Contains(body, "MERGING") {
+	if body := e.body(stale); !strings.Contains(body, "AWAITING_RELEASE_APPROVAL") {
 		t.Errorf("the 409 does not say what the job is doing now: %q", body)
 	}
-	if n := len(e.approvals()); n != 0 {
-		t.Fatalf("%d approval rows written by a stale decision", n)
+	// Counted against the row the fresh decision left behind rather than
+	// against zero: ConsumeApproval marks a row spent, it does not delete it.
+	if n := len(e.approvals()); n != before {
+		t.Fatalf("a stale decision wrote %d approval row(s)", n-before)
 	}
 
 	// A form with no state at all is refused too, or hand-posting one would be
