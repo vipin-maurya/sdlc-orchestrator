@@ -95,6 +95,13 @@
         pill.textContent = "stale — reconnecting — last update " + since;
       }
     }
+    // The no-JS refresh link is hidden only while the stream is genuinely
+    // live (spec 9.3). It comes back the moment the pill goes amber, because
+    // that is exactly when the page has stopped updating itself and clicking
+    // something is the only way forward.
+    var refresh = document.getElementById("refresh-link");
+    if (refresh) refresh.hidden = live;
+
     paintDecisionForms(live);
   }
 

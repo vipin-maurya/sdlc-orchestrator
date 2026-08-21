@@ -182,3 +182,10 @@ button[disabled], form.decision[data-disabled] button {
 
 .muted { color: var(--dim); }
 .right { text-align: right; }
+
+/* The no-JS refresh link (spec 9.3). app.js hides it once the stream is live;
+   without JavaScript it stays, which is the point of it. */
+.refresh {
+  margin-left: 0.75rem;
+  font-size: 0.85rem;
+}

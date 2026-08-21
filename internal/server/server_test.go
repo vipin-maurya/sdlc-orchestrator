@@ -260,3 +260,21 @@ func TestShutdownWithoutStart(t *testing.T) {
 		t.Fatal("Shutdown blocked when the hub had never been started")
 	}
 }
+
+// TestEveryPageOffersARefreshWithoutJavaScript holds spec §9.3's promise that
+// every page is usable with JavaScript off. app.js hides this link once the
+// stream is live, so it has to be in the server-rendered markup — a link the
+// script creates is a link that does not exist for the reader who needs it.
+func TestEveryPageOffersARefreshWithoutJavaScript(t *testing.T) {
+	e := newEnv(t)
+	j := e.job("AWAITING_MERGE_APPROVAL", "something to look at")
+	for _, p := range []string{
+		"/jobs", "/jobs/" + j.ID, "/jobs/" + j.ID + "/gate", "/jobs/" + j.ID + "/diff",
+		"/jobs/" + j.ID + "/events", "/jobs/" + j.ID + "/logs", "/submit", "/config",
+	} {
+		body := e.body(e.get(p))
+		if !strings.Contains(body, `id="refresh-link"`) {
+			t.Errorf("GET %s renders no refresh link, so the page is a dead end without JavaScript", p)
+		}
+	}
+}

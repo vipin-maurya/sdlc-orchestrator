@@ -30,6 +30,11 @@
        server-side claims freshness: a "live" rendered on the server is a claim
        about a moment that has already passed by the time it is read. */}}
   <span id="live-pill" class="pill">&nbsp;</span>
+  {{/* Rendered for everyone and hidden by app.js once the stream is live
+       (spec 9.3). With JavaScript off this link is the whole of the update
+       mechanism, so it ships in the markup rather than being created by the
+       script that would not be running. */}}
+  <a id="refresh-link" class="refresh" href="">Refresh</a>
 </header>
 
 {{if not .EngineUp}}
