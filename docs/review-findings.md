@@ -48,11 +48,11 @@ before trusting it — including, and especially, when you wrote it yourself.
 | `para()` appended into its caller's backing array | `blocks.go:278` | `6a91002` |
 | Truncation notice said "what follows is its head" from above the branch deciding whether anything follows; `Doc.DiffTruncated` had no reader; the `.diff` artifact was clipped mid-hunk with no marker | `review.go:151,369` | `6a91002` |
 | `-update-golden` wrote and returned without comparing, with no CI guard | `golden_test.go:74` | `6a91002` |
-| Pure renames and copies reported a path not in the repository: `a/`/`b/` stripped from four header lines that carry no prefix | `diff.go:575` | `edb18b1` |
-| A filename ending in a space was destroyed by `TrimRight` | `diff.go:570` | `edb18b1` |
-| `Split` hung forever on a `Kind` outside the enum | `split.go:34` | `edb18b1` |
-| The 70% intra-line guard was unpinned — 0.99, 0.35, and a flipped comparison all passed | `split.go:20` | `edb18b1` |
-| `git diff` ran with the user's prefix config, so `diff.noprefix` mangled every path on that machine alone | `gitx.go:305` | `edb18b1` |
+| Pure renames and copies reported a path not in the repository: `a/`/`b/` stripped from four header lines that carry no prefix | `diff.go:575` | `bddc4a1` |
+| A filename ending in a space was destroyed by `TrimRight` | `diff.go:570` | `bddc4a1` |
+| `Split` hung forever on a `Kind` outside the enum | `split.go:34` | `bddc4a1` |
+| The 70% intra-line guard was unpinned — 0.99, 0.35, and a flipped comparison all passed | `split.go:20` | `bddc4a1` |
+| `git diff` ran with the user's prefix config, so `diff.noprefix` mangled every path on that machine alone | `gitx.go:305` | `bddc4a1` |
 
 Each fix carries a test that fails without it, verified by reverting the fix and
 observing the failure.
