@@ -296,3 +296,115 @@ sdlc decides *whether* a change is fit to merge; autoship decides *whether the
 repo state is fit to ship* and does the shipping. Neither reaches into the
 other: sdlc invokes autoship as a command with an exit code, and autoship has no
 idea sdlc exists.
+
+---
+
+## 8. The web UI
+
+`sdlc serve` puts a web UI in front of the same database every other subcommand
+writes. It is a second interface to the engine, not a second engine: a decision
+recorded in the browser is the same `approve`/`reject`/`resume`/`cancel` row
+`sdlc approve` writes, and the running engine picks it up on its next tick.
+Nothing about the pipeline changes when it is not running.
+
+```bash
+sdlc serve                     # binds server.listen, default 127.0.0.1:7777
+sdlc serve --addr 127.0.0.1:0  # let the kernel pick a free port
+sdlc serve --v                 # one console line per request
+```
+
+It prints what it actually bound, not what you asked for — with port 0, or with
+`localhost` in the config, those differ:
+
+```
+sdlc serve listening on http://127.0.0.1:7777/
+  loopback only, and it has no authentication: anyone who can reach this address can approve a merge.
+  to reach it from another machine, forward the port: ssh -L 7777:127.0.0.1:7777 host
+  press ctrl-c to stop
+```
+
+Ctrl-C shuts it down and waits up to 5s for requests already in flight, so an
+approval POST mid-write is not cut off.
+
+The UI is read-and-decide: the job list and job detail, the gate document with
+the approve/reject form, the diff (unified or side-by-side, plus the raw patch),
+the event log, the artifacts, the logs, the prompts as sent, a submit form, and
+a read-only config page. Everything it serves is embedded in the binary — no
+CDN, no fonts, no analytics — so it renders on a machine with no network at all.
+Config *editing* is not offered anywhere: the file on disk stays the only way to
+change settings.
+
+### What it does not protect against
+
+**There is no authentication of any kind.** No login, no users, no roles, no
+tokens. Anyone who can open a TCP connection to that port can approve a merge,
+reject work, cancel a job — which deletes its worktree, losing anything not
+committed — and read every artifact, log, prompt and gate document the
+orchestrator holds. The trust boundary is the machine, exactly as it is for the
+CLI.
+
+What does exist is a set of checks that keep *that* boundary from being widened
+by accident or by a web page:
+
+- **The listener is loopback-only.** `server.listen` and `--addr` are both
+  validated, `localhost` is rewritten to `127.0.0.1` before the bind rather than
+  resolved at bind time, and anything routable is refused — with `--addr` as a
+  usage error (exit 2), in the config as a load failure.
+- **The `Host` header is allowlisted.** Only `127.0.0.1`, `::1` and `localhost`
+  are answered; anything else gets `421 Misdirected Request` with no application
+  content in the body. This is what stops DNS rebinding, where a page on an
+  attacker's domain re-resolves that name to `127.0.0.1` and becomes same-origin
+  with this server. A near-miss such as `127.0.0.1.evil.example` is a different
+  host and is refused too.
+- **Every POST carries a CSRF token**, double-submit against an `HttpOnly`,
+  `SameSite=Lax` cookie. A POST without a matching pair gets `403` and writes
+  nothing.
+- **Every file served by name is checked for membership** in the directory it
+  is served from — the listing decides, not a cleaned prefix — so a traversal
+  attempt reaches no file and symlinks do not resolve.
+
+Those defend a single operator on their own workstation. They are **not** a
+substitute for authentication and do not become one: put this on an interface
+another machine can reach and you have published an approve button. Do not run
+it behind a reverse proxy on a shared host, and do not "temporarily" bind
+`0.0.0.0` — the config refuses to, and that refusal is the feature.
+
+### Reaching it from another machine
+
+Forward the port over SSH and open it locally:
+
+```bash
+ssh -L 7777:127.0.0.1:7777 host
+# then browse http://127.0.0.1:7777/ on your laptop
+```
+
+This is the sanctioned shape because it puts the authentication where there
+already is some: SSH decides who gets to the port, with keys you already manage,
+and the server still sees only a loopback connection with a loopback `Host`. The
+UI gains no privilege it did not have, and nothing new is exposed if the tunnel
+is not up.
+
+### Three things to know while reading it
+
+**The config page redacts, but assume it shows everything.** Values whose key or
+flag name looks credential-shaped, and values matching credential-shaped
+environment variables, are replaced with `[redacted]`, and the page says when it
+has redacted something. That is a courtesy, not a boundary: the UI is a window
+onto everything the orchestrator knows — issue text, agent output, prompts,
+diffs, paths — and anyone who reaches it reads all of it.
+
+**A page that cannot prove it is current disables its approve buttons.** Each
+page keeps a live connection with a heartbeat; when the heartbeat stops, or when
+the stream reports that the job has moved to another state, the decision buttons
+grey out with the reason written next to them and the fix is to reload. That is
+a courtesy too — the server re-reads the job on every decision POST and answers
+`409` if its state no longer matches the state the page was rendered from, so a
+decision from a stale page cannot land either way. Without JavaScript every page
+still renders and every form still works; only the staleness signal is missing,
+and each page carries a plain refresh link in its place.
+
+**Gate documents render live, with the saved copy as a fallback.** The gate page
+runs the same render `sdlc review` does, against the worktree as it stands. When
+that is impossible — the worktree was cleaned up, the target was renamed out of
+the config — it falls back to the snapshot written when the job parked, and says
+on the page which of the two you are reading.

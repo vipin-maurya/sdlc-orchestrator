@@ -42,7 +42,10 @@ release path.
 
 - No container/VM sandboxing. Isolation = per-job git worktree + CLI-level
   tool restrictions + orchestrator-enforced diff policies (host execution).
-- No web dashboard, no Jira/GitHub integration. CLI is the only interface.
+- No Jira/GitHub integration. The interfaces are the CLI and `sdlc serve`
+  (§11), a localhost-only web UI over the same database: it has no
+  authentication, no users and no roles, its trust boundary is the machine,
+  and `server.listen` may bind only a loopback address (§12).
 - No PR flow. Merges are local (rebase + merge to the target's default
   branch, push if a remote exists).
 - No agent-run builds or tests. Gradle/adb are invoked by the orchestrator only.
@@ -686,6 +689,11 @@ clear error. Defaults: CODE_REVIEW vs IMPLEMENTING, DESIGN_REVIEW vs PLANNING.
   `limits.flake_rerun_count` times.
 - Failure log excerpts (last `limits.log_excerpt_lines` lines, plus any lines
   matching `limits.log_error_patterns`) are extracted for the ANALYZING prompt.
+- Captured output is bounded (the review patch at 4 MiB). A capture the cap
+  cut short is reported by a flag on the result, never inferred from the
+  length of the string — a patch that exactly fills the cap and one that
+  overran it are the same bytes — and a patch that stops short is labelled as
+  truncated wherever it is shown.
 
 Working dir = job worktree (MERGING verify runs there too; RELEASING runs in
 the main repo checkout). On Windows, `.bat`/`.cmd` commands are invoked via
@@ -731,6 +739,16 @@ sdlc submit  --target <key> [--title "..."] (--body "..." | --file issue.md)
 sdlc run     [--once]         start the engine (foreground; lock-file guarded).
                               --once drains runnable work then exits; default
                               runs until Ctrl-C.
+sdlc serve   [--addr host:port] [--v]
+                              serve the local web UI. Binds `server.listen`
+                              (§12); --addr overrides it and additionally
+                              allows port 0, which asks the kernel for a free
+                              one. Loopback addresses only — a non-loopback
+                              --addr is a usage error (exit 2), a non-loopback
+                              server.listen a config error (exit 1). Prints
+                              the address actually bound. --v logs every
+                              request. Ctrl-C shuts down, waiting up to 5s for
+                              requests already in flight.
 sdlc status  [job]            table of jobs / detail incl. counters, waits
 sdlc review  [job] [--diff] [--no-prompt]
                               print what the job is waiting on you to decide;
@@ -768,6 +786,10 @@ that default silently discarded `--to` in `sdlc resume JOB-1 --to BUILDING`.)
 running engine picks changes up on its next tick (`orchestrator.poll_interval`).
 Approvals print a diff-stat + artifact paths so the human can review before
 approving.
+
+`sdlc serve` is another writer of the same rows through the same code, not a
+second engine: a decision recorded in the browser is the row `sdlc approve`
+writes, and the running engine picks it up on the same tick.
 
 ---
 
@@ -915,6 +937,15 @@ git:
   cleanup_worktrees: on_success  # on_success | always | never
   delete_branch_on_success: false
 
+server:
+  listen: 127.0.0.1:7777        # `sdlc serve` binds here. Loopback only: the
+                                # UI has no authentication, so a routable
+                                # address publishes an approve button on the
+                                # network. `localhost` is accepted and
+                                # rewritten to 127.0.0.1 before the bind; the
+                                # IPv6 loopback must be quoted ("[::1]:7777"),
+                                # because bare brackets are a YAML sequence.
+
 targets:
   expensetracker:
     repo_path: C:\Users\vm899\repos\ExpenseTracker
@@ -950,6 +981,11 @@ targets:
       auto_resume_halt: true     # run resume_command before a retry
 ```
 
+Decoding is strict, so `server:` is a key that older binaries — those built
+before `sdlc serve` existed — reject outright rather than ignore. That is why
+`sdlc.example.yaml` ships the block commented out: uncomment it only to change
+the default.
+
 ---
 
 ## 13. Guardrails summary (all orchestrator-enforced)
@@ -984,7 +1020,6 @@ internal/
   config/       schema, defaults, strict YAML decode, validation, expansion
   store/        SQLite open/migrate, single-writer, job/event/approval DAOs
   engine/       scheduler, worker pool, state machine, handlers, resume
-  states/       one handler per state (planning.go, building.go, ...)
   agent/        AgentRunner, claude/agy/exec adapters, envelope parsing
   prompt/       embedded templates, rendering, hashing
   artifact/     paths, schema validation (spec/plan/review/impl/analysis)
@@ -992,6 +1027,10 @@ internal/
   execx/        streaming command runner (timeouts, env, cmd /c handling)
   resource/     gradle-slot semaphore, device pool, emulator boot
   guard/        policy checks (test-file globs, budgets, independence)
+  jobs/         the one submit path, shared by the CLI and the web UI
+  review/       the gate document both surfaces render (block model)
+  diff/         unified-diff parser, side-by-side pairing, intra-line marks
+  server/       `sdlc serve`: local web UI (loopback only, no authentication)
 prompts/        default templates (embedded via embed.FS)
 docs/SPEC.md    this document
 sdlc.example.yaml
