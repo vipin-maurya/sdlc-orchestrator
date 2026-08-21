@@ -2,6 +2,9 @@ package cli
 
 import (
 	"flag"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -140,4 +143,202 @@ func contains(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// --- submit ---------------------------------------------------------------
+
+// `sdlc submit` delegates to jobs.Submit so the CLI and the web form cannot
+// disagree about what a valid submission is. The delegation changes which code
+// produces each refusal, so the lines an operator (and any script reading an
+// exit code) depends on are pinned here. There was no such test before, which
+// is exactly how the two copies drifted.
+
+// An omitted --target is a usage error, not a failure: jobs.Submit reports it
+// as an unknown target, which would be exit 1.
+func TestSubmitEmptyTargetIsAUsageError(t *testing.T) {
+	e := newReviewEnv(t)
+	var code int
+	stderr := captureStderr(t, func() { code = cmdSubmit(e.cfg, []string{"--title", "anything"}) })
+	if code != 2 {
+		t.Errorf("exit = %d, want 2", code)
+	}
+	if got := strings.TrimRight(stderr, "\n"); got != "error: --target is required" {
+		t.Errorf("stderr = %q, want %q", got, "error: --target is required")
+	}
+}
+
+// The missing-title line names the two flags that supply one, and exits 2.
+// jobs.ErrNoTitle says "a title is required" — right for the web form, which
+// has no flags — and this is where that sentinel becomes this command's words.
+func TestSubmitMissingTitleMessageAndExitCode(t *testing.T) {
+	e := newReviewEnv(t)
+	const want = "error: --title (or --file with a heading) is required"
+	empty := filepath.Join(t.TempDir(), "issue.md")
+	if err := os.WriteFile(empty, []byte("   \n\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"no title at all", []string{"--target", "demo"}},
+		{"body but no title", []string{"--target", "demo", "--body", "it is broken"}},
+		{"whitespace title", []string{"--target", "demo", "--title", "   "}},
+		{"file with no heading", []string{"--target", "demo", "--file", empty}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var code int
+			stderr := captureStderr(t, func() { code = cmdSubmit(e.cfg, tc.args) })
+			if code != 2 {
+				t.Errorf("exit = %d, want 2", code)
+			}
+			if got := strings.TrimRight(stderr, "\n"); got != want {
+				t.Errorf("stderr = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+// The size cap and the control-character rule arrived with jobs.Submit and now
+// apply to the CLI too. Each must surface as one sentence naming what was
+// wrong — not as a panic, and not as a job row with an escape sequence in the
+// title that an approver's terminal will interpret.
+func TestSubmitRefusesAnUnprintableOrOversizedTitle(t *testing.T) {
+	e := newReviewEnv(t)
+	big := strings.Repeat("x", 501)
+	cases := []struct {
+		name, title, body, want string
+	}{
+		{"escape sequence in the title", "fix \x1b[31mthis\x1b[0m", "", "control characters"},
+		{"newline in the title", "line one\nline two", "", "control characters"},
+		{"title over the cap", big, "", "at most 500 bytes"},
+		{"NUL in the body", "fine", "before\x00after", "NUL byte"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var code int
+			stderr := captureStderr(t, func() {
+				code = cmdSubmit(e.cfg, []string{"--target", "demo", "--title", tc.title, "--body", tc.body})
+			})
+			if code != 1 {
+				t.Errorf("exit = %d, want 1", code)
+			}
+			if !strings.Contains(stderr, tc.want) {
+				t.Errorf("stderr = %q, want it to mention %q", stderr, tc.want)
+			}
+			if !strings.HasPrefix(stderr, "error: ") || strings.Contains(stderr, "goroutine") {
+				t.Errorf("not a clean one-line error: %q", stderr)
+			}
+		})
+	}
+	if jobs, err := e.st.ListJobs(); err != nil {
+		t.Fatal(err)
+	} else if len(jobs) != 0 {
+		t.Errorf("%d job(s) created by refused submissions", len(jobs))
+	}
+}
+
+// An unknown target keeps the failure exit and jobs.Submit's sentence, which
+// lists the targets that do exist.
+func TestSubmitUnknownTargetIsAFailureExit(t *testing.T) {
+	e := newReviewEnv(t)
+	var code int
+	stderr := captureStderr(t, func() {
+		code = cmdSubmit(e.cfg, []string{"--target", "nope", "--title", "x"})
+	})
+	if code != 1 {
+		t.Errorf("exit = %d, want 1", code)
+	}
+	if !strings.Contains(stderr, "nope") {
+		t.Errorf("stderr = %q, want it to name the target", stderr)
+	}
+}
+
+// The happy path goes through jobs.Submit: the row it writes carries the
+// trimmed title, the branch derived from the target's prefix, and a body that
+// falls back to the title.
+func TestSubmitCreatesTheJobThroughJobsSubmit(t *testing.T) {
+	e := newReviewEnv(t)
+	if code := cmdSubmit(e.cfg, []string{"--target", "demo", "--title", "  Fix the thing  "}); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	all, err := e.st.ListJobs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("%d jobs, want 1", len(all))
+	}
+	j := all[0]
+	if j.IssueTitle != "Fix the thing" {
+		t.Errorf("title = %q, want %q", j.IssueTitle, "Fix the thing")
+	}
+	if j.IssueBody != "Fix the thing" {
+		t.Errorf("body = %q, want it to fall back to the title", j.IssueBody)
+	}
+	if j.Branch != "sdlc/"+j.ID || j.State != "CREATED" {
+		t.Errorf("branch/state = %q/%q", j.Branch, j.State)
+	}
+}
+
+// --file with no --title takes the first line as the title, stripped of its
+// heading hashes however many there are — the CLI's old copy stripped exactly
+// one, so "## Fix it" became a job titled "# Fix it".
+func TestSubmitFileHeadingBecomesTheTitle(t *testing.T) {
+	e := newReviewEnv(t)
+	p := filepath.Join(t.TempDir(), "issue.md")
+	if err := os.WriteFile(p, []byte("## Fix it\n\nthe details\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code := cmdSubmit(e.cfg, []string{"--target", "demo", "--file", p}); code != 0 {
+		t.Fatalf("exit = %d, want 0", code)
+	}
+	all, err := e.st.ListJobs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 1 || all[0].IssueTitle != "Fix it" {
+		t.Fatalf("title = %q, want %q", all[0].IssueTitle, "Fix it")
+	}
+	if all[0].IssueBody != "the details" {
+		t.Errorf("body = %q, want %q", all[0].IssueBody, "the details")
+	}
+}
+
+// jobs.Submit is only the shared path if it is the only path. A second caller
+// of store.CreateJob is a second set of rules about titles, branches and
+// bodies, which is the state this delegation was undoing.
+func TestCreateJobHasOneNonTestCaller(t *testing.T) {
+	var callers []string
+	err := filepath.WalkDir("../..", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, ln := range strings.Split(string(src), "\n") {
+			if strings.Contains(ln, ".CreateJob(") {
+				callers = append(callers, path+": "+strings.TrimSpace(ln))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(callers) != 1 || !strings.Contains(callers[0], filepath.Join("internal", "jobs", "submit.go")) {
+		t.Errorf("store.CreateJob callers = %v, want exactly internal/jobs/submit.go", callers)
+	}
 }

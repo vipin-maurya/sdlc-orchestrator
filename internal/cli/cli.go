@@ -5,6 +5,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -22,6 +23,7 @@ import (
 	"github.com/vipinm/sdlc-orchestrator/internal/config"
 	"github.com/vipinm/sdlc-orchestrator/internal/engine"
 	"github.com/vipinm/sdlc-orchestrator/internal/gitx"
+	"github.com/vipinm/sdlc-orchestrator/internal/jobs"
 	"github.com/vipinm/sdlc-orchestrator/internal/review"
 	"github.com/vipinm/sdlc-orchestrator/internal/store"
 )
@@ -36,6 +38,9 @@ Usage:
 Commands:
   submit    --target <key> --title "..." (--body "..." | --file issue.md)
   run       [--once]                 start the engine (foreground)
+  serve     [--addr 127.0.0.1:7777] [--v]
+                                     local web UI: read jobs, decide gates
+                                     (loopback only; there is no login)
   status    [JOB-ID]                 list jobs / show one job in detail
   review    [JOB-ID] [--diff] [--no-prompt]
                                      show what a job is waiting on you to
@@ -83,6 +88,8 @@ func Main(args []string) int {
 		return cmdSubmit(cfg, rest)
 	case "run":
 		return cmdRun(cfg, rest)
+	case "serve":
+		return cmdServe(cfg, rest)
 	case "status":
 		return cmdStatus(cfg, rest)
 	case "review":
@@ -167,64 +174,56 @@ func cmdSubmit(cfg *config.Config, args []string) int {
 		return argFail(err)
 	}
 
+	// Checked here rather than left to jobs.Submit, which reports an empty
+	// target as the unknown target it also is. That message is right for the
+	// web form, which has no --target to omit, but it would turn this command's
+	// long-standing usage exit (2) into a failure exit (1) for the commonest
+	// typo there is. TestSubmitEmptyTargetIsAUsageError pins both.
 	if *target == "" {
 		fmt.Fprintln(os.Stderr, "error: --target is required")
 		return 2
 	}
-	t, err := cfg.Target(*target)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		return 1
-	}
-	issueBody := *body
-	issueTitle := *title
+
+	issueTitle, issueBody := *title, *body
 	if *file != "" {
 		data, err := os.ReadFile(*file)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "error:", err)
 			return 1
 		}
-		issueBody = string(data)
-		if issueTitle == "" {
-			lines := strings.SplitN(strings.TrimSpace(issueBody), "\n", 2)
-			issueTitle = strings.TrimSpace(strings.TrimPrefix(lines[0], "#"))
-			if len(lines) > 1 {
-				issueBody = strings.TrimSpace(lines[1])
-			}
-		}
+		issueTitle, issueBody = jobs.TitleAndBody(*title, string(data))
 	}
-	if issueTitle == "" {
-		fmt.Fprintln(os.Stderr, "error: --title (or --file with a heading) is required")
-		return 2
-	}
-	if issueBody == "" {
-		issueBody = issueTitle
-	}
+
 	st, err := openStore(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
 	defer st.Close()
-	id, err := st.NextJobID(cfg.Orchestrator.JobIDPrefix)
+
+	// jobs.Submit, not a copy of it: this command and the web form must not be
+	// able to disagree about which targets exist, what makes a title valid or
+	// what an empty body defaults to. They already had drifted while there were
+	// two copies.
+	job, err := jobs.Submit(cfg, st, jobs.SubmitRequest{Target: *target, Title: issueTitle, Body: issueBody})
 	if err != nil {
+		if errors.Is(err, jobs.ErrNoTitle) {
+			// This command's own wording rather than the sentinel's: the two
+			// ways to supply a title here are flags, and naming them is the
+			// whole of what the reader needs to do next. jobs.ErrNoTitle is
+			// phrased for a caller that has no flags to name.
+			// TestSubmitMissingTitleMessageAndExitCode pins this line.
+			fmt.Fprintln(os.Stderr, "error: --title (or --file with a heading) is required")
+			return 2
+		}
+		// Everything else — an unknown target, an oversized or control-charactered
+		// title or body, a store failure — is a failure exit with the sentence
+		// Submit wrote. Each of those sentences names its own limit, so nothing
+		// is added in front of it.
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
-	job := &store.Job{
-		ID:           id,
-		Target:       *target,
-		IssueTitle:   issueTitle,
-		IssueBody:    issueBody,
-		Branch:       t.BranchPrefix + id,
-		WorktreePath: filepath.Join(t.WorktreesDir, id),
-		State:        "CREATED",
-	}
-	if err := st.CreateJob(job); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		return 1
-	}
-	fmt.Printf("%s submitted (target %s, branch %s)\n", id, *target, job.Branch)
+	fmt.Printf("%s submitted (target %s, branch %s)\n", job.ID, job.Target, job.Branch)
 	fmt.Println("start the engine with: sdlc run")
 	return 0
 }
