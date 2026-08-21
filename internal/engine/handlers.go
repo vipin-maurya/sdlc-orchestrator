@@ -112,12 +112,33 @@ func (c *jobCtx) handleDesignReview(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if blockers := rev.Blockers(); len(blockers) > 0 {
+	threshold := c.e.cfg.Policies.DesignReviewBlocksAt
+	// Nothing downstream can tell a correct finding from a fluent wrong one, so
+	// anything about to gate is put to independent verifiers first. rev is
+	// updated in place: refuted findings survive as annotated nits.
+	if _, err := c.verifyFindings(ctx, rev, name, threshold); err != nil {
+		return "", err
+	}
+	if blocking := rev.Blocking(threshold); len(blocking) > 0 {
 		c.job.Counters.DesignReviewRounds = round
 		if round >= c.e.cfg.Limits.MaxDesignReviewRounds {
-			return "", escalate("design review still has %d blocker(s) after %d round(s); see %s", len(blockers), round, name)
+			return "", escalate("design review still has %d finding(s) at or above %s after %d round(s); see %s",
+				len(blocking), threshold, round, name)
 		}
 		return SPlanning, nil
+	}
+	// The gate passed, but findings below the threshold are real observations
+	// about a plan nobody has implemented yet. Remember which artifact holds
+	// them so IMPLEMENTING can be handed them instead of discarding them.
+	c.job.Counters.LastDesignReview = ""
+	if len(rev.Findings) > 0 {
+		// Prefer the verified copy when there is one: a finding the verifiers
+		// refuted must reach the implementer *with* its refutation attached,
+		// or the implementer reworks correct code on a dismissed claim.
+		c.job.Counters.LastDesignReview = c.preferVerified(name)
+		c.e.event(c.job, "note", map[string]any{
+			"design_review_passed_with_findings": len(rev.Findings), "threshold": threshold, "artifact": name,
+		})
 	}
 	return SImplementing, nil
 }
@@ -131,11 +152,33 @@ func (c *jobCtx) handleImplementing(ctx context.Context) (string, error) {
 	c.stageArtifact("spec.json")
 	c.stageArtifact("plan.json")
 	pctx := c.baseCtx()
+	// Non-blocking design-review findings: the reviewer read this plan and saw
+	// something the planner did not. Nobody else will look at the plan again,
+	// so this is the last point at which those findings can reach anyone.
+	if name := c.job.Counters.LastDesignReview; name != "" {
+		c.stageArtifactAs(name, "design_review.json")
+		pctx.PrevFindings = c.findingsJSON(name)
+	}
+	plan, err := artifact.LoadPlan(filepath.Join(c.artDir(), "plan.json"))
+	if err != nil {
+		return "", err
+	}
 	implPath := filepath.Join(c.sdlcDir(), "implementation.json")
-	entryHead := c.job.HeadSHA
-	err := c.runAgent(ctx, SImplementing, pctx, func() error {
-		if _, err := artifact.LoadImplementation(implPath); err != nil {
+	entryHead, err := c.agentBaseline(ctx)
+	if err != nil {
+		return "", err
+	}
+	var unreported []string
+	err = c.runAgent(ctx, SImplementing, pctx, func() error {
+		impl, err := artifact.LoadImplementation(implPath)
+		if err != nil {
 			return err
+		}
+		// Every plan step must be accounted for. Silence about a step is
+		// indistinguishable from "I forgot", so it fails the state (SPEC §6.1).
+		if missing := impl.CheckStepCoverage(plan); len(missing) > 0 {
+			return fmt.Errorf("steps_completed does not account for plan step(s) %s; every step in plan.json must appear, either done or skipped with a note",
+				strings.Join(missing, ", "))
 		}
 		changed, err := c.repo.DiffNamesSince(ctx, c.job.WorktreePath, entryHead)
 		if err != nil {
@@ -143,6 +186,13 @@ func (c *jobCtx) handleImplementing(ctx context.Context) (string, error) {
 		}
 		if len(changed) == 0 {
 			return fmt.Errorf("implementation produced no code changes")
+		}
+		claimed := append(append([]string{}, impl.FilesChanged...), impl.TestsAddedOrChanged...)
+		var phantom []string
+		phantom, unreported = reconcileClaims(claimed, changed)
+		if len(phantom) > 0 {
+			return fmt.Errorf("reported as changed but unmodified in the worktree: %s",
+				strings.Join(phantom, ", "))
 		}
 		return nil
 	})
@@ -155,6 +205,14 @@ func (c *jobCtx) handleImplementing(ctx context.Context) (string, error) {
 	impl, err := artifact.LoadImplementation(filepath.Join(c.artDir(), "implementation.json"))
 	if err != nil {
 		return "", err
+	}
+	// Divergences that are defensible but must not be silent: work done off
+	// the report, and planned steps deliberately not done.
+	if len(unreported) > 0 {
+		c.e.event(c.job, "note", map[string]any{"changed_but_unreported": unreported})
+	}
+	if skipped := impl.SkippedSteps(); len(skipped) > 0 {
+		c.e.event(c.job, "note", map[string]any{"plan_steps_skipped": skipped})
 	}
 	if err := c.commit(ctx, SImplementing, impl.Summary); err != nil {
 		return "", err
@@ -179,7 +237,7 @@ func (c *jobCtx) handleCodeReview(ctx context.Context) (string, error) {
 	pctx.Round = round
 	pctx.MaxRounds = c.e.cfg.Limits.MaxCodeReviewRounds
 	if round > 1 {
-		pctx.PrevFindings = c.findingsJSON(fmt.Sprintf("code_review.r%d.json", round-1))
+		pctx.PrevFindings = c.findingsJSON(c.preferVerified(fmt.Sprintf("code_review.r%d.json", round-1)))
 	}
 	reviewPath := filepath.Join(c.sdlcDir(), "review.json")
 	err := c.runAgent(ctx, SCodeReview, pctx, func() error {
@@ -199,13 +257,19 @@ func (c *jobCtx) handleCodeReview(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if blockers := rev.Blockers(); len(blockers) > 0 {
+	threshold := c.e.cfg.Policies.CodeReviewBlocksAt
+	if _, err := c.verifyFindings(ctx, rev, name, threshold); err != nil {
+		return "", err
+	}
+	if blocking := rev.Blocking(threshold); len(blocking) > 0 {
 		c.job.Counters.CodeReviewRounds = round
 		if round >= c.e.cfg.Limits.MaxCodeReviewRounds {
-			return "", escalate("code review still has %d blocker(s) after %d round(s); see %s", len(blockers), round, name)
+			return "", escalate("code review still has %d finding(s) at or above %s after %d round(s); see %s",
+				len(blocking), threshold, round, name)
 		}
 		if c.job.Counters.FixAttempts >= c.e.cfg.Limits.MaxFixAttempts {
-			return "", escalate("code review has blockers but fix budget (%d) is exhausted", c.e.cfg.Limits.MaxFixAttempts)
+			return "", escalate("code review has %d finding(s) at or above %s but fix budget (%d) is exhausted",
+				len(blocking), threshold, c.e.cfg.Limits.MaxFixAttempts)
 		}
 		c.job.Counters.FixSource = "code_review"
 		return SFixing, nil
@@ -337,6 +401,12 @@ func (c *jobCtx) handleFlakeCheck(ctx context.Context) (string, error) {
 	n := c.e.cfg.Limits.FlakeRerunCount
 	passes := 0
 	for i := 0; i < n; i++ {
+		// Three full suite reruns look identical from outside without this:
+		// say which one is in flight and how the earlier ones went.
+		c.e.event(c.job, "progress", map[string]any{
+			"flake_rerun": i + 1, "of": n, "phase": phase, "passes_so_far": passes,
+		})
+		c.e.logger.Printf("%s: FLAKE_CHECK %s rerun %d/%d (%d passed so far)", c.job.ID, phase, i+1, n, passes)
 		exit, _, err := c.runPhase(ctx, fmt.Sprintf("flake-rerun-%d", i+1), argv, timeout, env)
 		if err != nil {
 			return "", err
@@ -429,16 +499,24 @@ func (c *jobCtx) handleFixing(ctx context.Context) (string, error) {
 			pctx.FailingTargets = strings.Join(an.FailingTargets, ", ")
 		}
 	case "code_review":
-		pctx.PrevFindings = c.findingsJSON(fmt.Sprintf("code_review.r%d.json", c.job.Counters.CodeReviewRounds))
+		pctx.PrevFindings = c.findingsJSON(c.preferVerified(fmt.Sprintf("code_review.r%d.json", c.job.Counters.CodeReviewRounds)))
 	case "final_review":
-		pctx.PrevFindings = c.findingsJSON("final_review.json")
+		pctx.PrevFindings = c.findingsJSON(c.preferVerified("final_review.json"))
 	case "human":
 		pctx.RejectReason = c.job.Counters.HumanRejectReason
 	}
 
-	entryHead := c.job.HeadSHA
+	// Read the branch head now rather than trusting the job record: this sha
+	// is what CheckFixDiff attributes to the agent, and what a guard violation
+	// resets the branch back to. If a human committed on this branch since the
+	// last orchestrator commit, a stale baseline would blame them for it and
+	// then delete their work.
+	entryHead, err := c.agentBaseline(ctx)
+	if err != nil {
+		return "", err
+	}
 	fixPath := filepath.Join(c.sdlcDir(), "fix.json")
-	err := c.runAgent(ctx, SFixing, pctx, func() error {
+	err = c.runAgent(ctx, SFixing, pctx, func() error {
 		if _, err := artifact.LoadImplementation(fixPath); err != nil {
 			return err
 		}
@@ -519,16 +597,27 @@ func (c *jobCtx) handleFinalReview(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if blockers := rev.Blockers(); len(blockers) > 0 {
+	threshold := c.e.cfg.Policies.FinalReviewBlocksAt
+	if _, err := c.verifyFindings(ctx, rev, "final_review.json", threshold); err != nil {
+		return "", err
+	}
+	if blocking := rev.Blocking(threshold); len(blocking) > 0 {
 		if c.job.Counters.FixAttempts >= c.e.cfg.Limits.MaxFixAttempts {
-			return "", escalate("final review has %d blocker(s) and fix budget is exhausted", len(blockers))
+			return "", escalate("final review has %d finding(s) at or above %s and fix budget is exhausted",
+				len(blocking), threshold)
 		}
 		c.job.Counters.FixSource = "final_review"
 		return SFixing, nil
 	}
-	// Park for the human: surface a diff stat in the event log.
+	// Park for the human: surface a diff stat in the event log, plus any
+	// findings that did not meet the blocking threshold — the approver is the
+	// only remaining reader, so they must not be dropped here either.
 	stat, _ := c.repo.DiffStatSince(ctx, c.job.WorktreePath, c.job.Counters.BaseSHA)
-	c.e.event(c.job, "note", map[string]any{"awaiting_merge_approval": true, "diff_stat": stat, "final_summary": rev.Summary})
+	note := map[string]any{"awaiting_merge_approval": true, "diff_stat": stat, "final_summary": rev.Summary}
+	if len(rev.Findings) > 0 {
+		note["non_blocking_findings"] = rev.Findings
+	}
+	c.e.event(c.job, "note", note)
 	return SAwaitMerge, nil
 }
 

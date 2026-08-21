@@ -28,8 +28,18 @@ the approach fits the actual code), but you MUST NOT modify anything.
 # Severity calibration
 
 - `blocker`: the implementation would fail or solve the wrong problem if this is not fixed.
-- `major`: significant gap, but an implementer could plausibly still succeed.
+  This includes the silent case: if following the plan produces code that compiles, reads as
+  correct, and survives review, but does not produce the intended behaviour at runtime — a
+  value written where nothing reads it, a handle obtained from the wrong scope, a guard that
+  can never be true — that is a `blocker`. "An attentive implementer would probably catch it"
+  is not a reason to downgrade. Nobody downstream re-reads this plan.
+- `major`: a real gap whose failure is visible — a missing case, an underspecified step, an
+  ordering problem an implementer would hit and have to resolve.
 - `minor` / `nit`: improvements; never block on these.
+
+Findings below the blocking threshold are NOT discarded — they are handed to the implementation
+agent verbatim. So grade honestly: there is no need to inflate a severity to make sure something
+gets read, and no benefit to it.
 
 Only report real findings. If the spec and plan are sound, an empty findings list is the correct
 answer — do NOT invent findings to appear thorough.

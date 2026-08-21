@@ -33,6 +33,10 @@ Title: {{.IssueTitle}}
 # Severity calibration
 
 - `blocker`: spec violated, correctness bug, missing/weakened test coverage for a criterion.
+  Code that compiles and reads as correct but does not take effect at runtime is a correctness
+  bug, not a `major` — a value written to a scope nothing reads from, a listener registered on
+  the wrong object, a branch that can never be taken. Trace the data path; do not assume that
+  code which looks right runs right.
 - `major`: real problem that should be fixed but does not break the contract.
 - `minor` / `nit`: style and polish; never block on these.
 

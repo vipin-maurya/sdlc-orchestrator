@@ -30,6 +30,11 @@ func (r Repo) git(ctx context.Context, dir string, args ...string) (string, erro
 		Argv:    append([]string{"git"}, args...),
 		Dir:     dir,
 		Timeout: gitTimeout,
+		// Callers parse this output. git puts warnings on stderr — notably
+		// the Windows "LF will be replaced by CRLF" notice — and a merged
+		// stream turns those into phantom filenames. Failures still carry
+		// stderr through for the error message below.
+		StderrSeparate: true,
 	}, 1<<20)
 	if err != nil {
 		return out, fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
@@ -142,13 +147,68 @@ func (r Repo) HeadSHA(ctx context.Context, dir string) (string, error) {
 }
 
 // IsDirty reports whether the worktree has uncommitted changes (staged,
-// unstaged, or untracked).
-func (r Repo) IsDirty(ctx context.Context, dir string) (bool, error) {
-	out, err := r.git(ctx, dir, "status", "--porcelain")
+// unstaged, or untracked). It goes through DirtyFiles so a git warning on
+// stderr cannot be mistaken for uncommitted work — a false positive here
+// would fail an innocent reviewer state under reviewer_diff_must_be_empty.
+// IsAncestor reports whether commit a is an ancestor of commit b (a commit
+// is its own ancestor). It is how the orchestrator tells "the branch moved
+// forward under me" from "the branch diverged": the first is safe to adopt,
+// the second must never be resolved by discarding one side.
+func (r Repo) IsAncestor(ctx context.Context, dir, a, b string) (bool, error) {
+	if a == "" || b == "" {
+		return false, fmt.Errorf("IsAncestor: empty sha (a=%q b=%q)", a, b)
+	}
+	if a == b {
+		return true, nil
+	}
+	if dir == "" {
+		dir = r.Root
+	}
+	res, _, err := execx.RunCapture(ctx, execx.Cmd{
+		Argv:           []string{"git", "merge-base", "--is-ancestor", a, b},
+		Dir:            dir,
+		Timeout:        gitTimeout,
+		StderrSeparate: true,
+	}, 1<<16)
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(out) != "", nil
+	switch res.ExitCode {
+	case 0:
+		return true, nil
+	case 1:
+		return false, nil
+	default:
+		// 128 = one of the shas is unknown to this repository.
+		return false, fmt.Errorf("merge-base --is-ancestor %s %s: exit %d", a, b, res.ExitCode)
+	}
+}
+
+func (r Repo) IsDirty(ctx context.Context, dir string) (bool, error) {
+	files, err := r.DirtyFiles(ctx, dir)
+	if err != nil {
+		return false, err
+	}
+	return len(files) > 0, nil
+}
+
+// porcelainCodes are the status characters git uses in `status --porcelain`
+// (v1) index/worktree columns.
+const porcelainCodes = " MADRCUT?!"
+
+// isPorcelainEntry reports whether ln is a real `status --porcelain` entry
+// rather than a diagnostic. StderrSeparate above already keeps git's warnings
+// (on Windows, most often "in the working copy of 'x', LF will be replaced by
+// CRLF") out of this stream; this is the second line of defence, since one
+// stray line here becomes a phantom changed file in the fix-policy guard, the
+// implementation post-condition, and the retry prompt.
+func isPorcelainEntry(ln string) bool {
+	if len(ln) < 4 || ln[2] != ' ' {
+		return false
+	}
+	return strings.IndexByte(porcelainCodes, ln[0]) >= 0 &&
+		strings.IndexByte(porcelainCodes, ln[1]) >= 0 &&
+		!(ln[0] == ' ' && ln[1] == ' ')
 }
 
 // DirtyFiles lists paths (repo-relative, slash-separated) with uncommitted
@@ -161,7 +221,7 @@ func (r Repo) DirtyFiles(ctx context.Context, dir string) ([]string, error) {
 	var files []string
 	for _, ln := range strings.Split(out, "\n") {
 		ln = strings.TrimRight(ln, "\r")
-		if len(ln) < 4 {
+		if !isPorcelainEntry(ln) {
 			continue
 		}
 		p := strings.TrimSpace(ln[3:])
@@ -239,9 +299,10 @@ func (r Repo) DiffNamesSince(ctx context.Context, dir, sha string) ([]string, er
 // (bounded to ~4MB). Staged for reviewers so they never need shell access.
 func (r Repo) DiffPatchSince(ctx context.Context, dir, sha string) (string, error) {
 	res, out, err := execx.RunCapture(ctx, execx.Cmd{
-		Argv:    []string{"git", "diff", sha},
-		Dir:     dir,
-		Timeout: gitTimeout,
+		Argv:           []string{"git", "diff", sha},
+		Dir:            dir,
+		Timeout:        gitTimeout,
+		StderrSeparate: true, // reviewers read this patch; keep warnings out of it
 	}, 4<<20)
 	if err != nil {
 		return "", err

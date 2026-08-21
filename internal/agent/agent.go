@@ -143,8 +143,23 @@ func (r *Runner) runAgy(ctx context.Context, s Spec) (Result, error) {
 }
 
 func (r *Runner) runExec(ctx context.Context, s Spec) (Result, error) {
-	promptFile := filepath.Join(os.TempDir(), fmt.Sprintf("sdlc-prompt-%d.md", time.Now().UnixNano()))
-	if err := os.WriteFile(promptFile, []byte(s.Prompt), 0o600); err != nil {
+	// The name must be unique per invocation, not merely unlikely to repeat.
+	// A timestamp is not: Windows' clock granularity is coarse enough that
+	// agents spawned together in the same millisecond collide, and then two
+	// backends read one prompt while a third deletes it out from under them.
+	// The verify pass runs several agents at once, so this is a live path.
+	f, err := os.CreateTemp("", "sdlc-prompt-*.md")
+	if err != nil {
+		return Result{}, err
+	}
+	promptFile := f.Name()
+	if _, err := f.WriteString(s.Prompt); err != nil {
+		f.Close()
+		os.Remove(promptFile)
+		return Result{}, err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(promptFile)
 		return Result{}, err
 	}
 	defer os.Remove(promptFile)

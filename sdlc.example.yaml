@@ -26,6 +26,17 @@ limits:
   release_retry_backoff: 10m
   max_agent_invocations_per_job: 40
   log_excerpt_lines: 200        # failure-log tail fed to the analysis agent
+  # Verify pass. A review finding severe enough to stop the pipeline is put to
+  # this many independent agents, each asked to REFUTE it, before it is allowed
+  # to gate. Only gating findings are verified — a clean review, the common
+  # case, invokes nobody and costs nothing. Set verify_votes: 0 to switch the
+  # pass off and gate on the reviewer's word alone.
+  verify_votes: 3
+  # How many of those votes must confirm for the finding to survive at its
+  # stated severity. Below this it is downgraded to a nit and kept in the
+  # artifact with every verdict attached, so the record shows what was
+  # considered and why it was dismissed.
+  verify_min_confirm: 2
 
 resources:
   gradle_slots: 1               # concurrent build/test invocations, all jobs
@@ -63,9 +74,13 @@ backends:
 agents:
   opus:   { backend: claude, model: opus,   effort: high }
   sonnet: { backend: claude, model: sonnet }
-  # agy model ids embed the effort level (see `agy models`); pick e.g.
-  # gemini-3.1-pro-high for maximum quality instead.
-  gemini: { backend: agy,    model: gemini-3.7-flash-medium }
+  # agy model ids embed the effort level (see `agy models`). IMPLEMENTING and
+  # FIXING run on this agent and are the longest, most delicate states in the
+  # pipeline, so it carries the pro model; drop to gemini-3.7-flash-medium only
+  # for cheap experiments. Note this cannot simply be pointed at opus: the
+  # backend-independence guardrail requires CODE_REVIEW and FINAL_REVIEW to use
+  # a different backend than IMPLEMENTING.
+  gemini: { backend: agy,    model: gemini-3.1-pro-high }
 
 # Per-state agent mapping. Review/analyze states keep Write (they must emit
 # their .sdlc output file — any source-tree edit is mechanically discarded and
@@ -80,11 +95,29 @@ states:
   ANALYZING:     { agent: sonnet, timeout: 10m, disallowed_tools: [Edit, NotebookEdit, Bash] }
   FIXING:        { agent: gemini, timeout: 45m }
   FINAL_REVIEW:  { agent: opus,   timeout: 20m, disallowed_tools: [Edit, NotebookEdit, Bash], must_differ_backend_from: IMPLEMENTING }
+  # VERIFYING is not a state the pipeline moves through: it configures the
+  # agents that check the reviewers, run inside the three review states once
+  # per gating finding. This is the one stage where the strongest model earns
+  # its cost — refuting a plausible claim is harder than producing one — so
+  # keep it at or above the tier of the reviewers it audits, never below.
+  # It keeps Bash, unlike the reviewers: the rule that refutes most false
+  # findings is "read the resolved dependency rather than answering from
+  # memory", which means unzipping a jar or reading the dependency cache.
+  VERIFYING:     { agent: opus,   timeout: 15m, disallowed_tools: [Edit, NotebookEdit] }
   # Each state also accepts: prompt: path/to/custom_prompt.md (overrides the
   # embedded default template for that state).
 
 policies:
   protected_branches: [main, master]
+  # Lowest finding severity that stops the pipeline at each review gate:
+  # blocker | major | minor | nit. Findings below the threshold never block but
+  # are still forwarded — design-review ones into the IMPLEMENTING prompt,
+  # final-review ones into the merge-approval event. Design review blocks at
+  # major because it is the cheapest loop in the pipeline: one review round
+  # against a whole implementation.
+  design_review_blocks_at: major
+  code_review_blocks_at: blocker
+  final_review_blocks_at: blocker
   protect_tests_on_code_bug_fix: true   # FIXING may not touch tests when the failure was a code bug
   test_file_globs:
     - "**/src/test/**"

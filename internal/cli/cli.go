@@ -39,7 +39,9 @@ Commands:
   approve   <JOB-ID> [--note "..."]  approve the pending merge/release gate
   reject    <JOB-ID> --reason "..." [--cancel]
   cancel    <JOB-ID>
-  resume    <JOB-ID> [--to STATE]    clear an ESCALATED/TIMED_OUT/quota hold
+  resume    <JOB-ID> [--to STATE] [--note "..."]
+                                     clear an ESCALATED/TIMED_OUT/quota hold;
+                                     --note instructs the next agent directly
   events    <JOB-ID>                 event log
   logs      <JOB-ID> [--last]        artifact & log paths (tail last log)
   validate  [--smoke]                config + environment doctor
@@ -102,13 +104,52 @@ func openStore(cfg *config.Config) (*store.Store, error) {
 	return store.Open(cfg.Database.Path, cfg.Database.BusyTimeout.D())
 }
 
+// parseArgs parses flags that may appear before, after, or between positional
+// arguments. Go's flag package stops at the first non-flag token, so
+// `sdlc resume JOB-1 --to BUILDING` would otherwise leave --to unparsed and
+// silently ignored — which once resumed a job into the wrong state. Parsing
+// resumes after each positional is consumed, so both orderings behave alike.
+//
+// want is the exact number of positional arguments the command takes; anything
+// beyond it is an error rather than something quietly dropped.
+func parseArgs(fs *flag.FlagSet, args []string, want int, usage string) ([]string, error) {
+	var pos []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		rest := fs.Args()
+		if len(rest) == 0 {
+			break
+		}
+		pos = append(pos, rest[0])
+		args = rest[1:]
+	}
+	if len(pos) < want {
+		return nil, fmt.Errorf("usage: %s", usage)
+	}
+	if len(pos) > want {
+		return nil, fmt.Errorf("unexpected argument(s) %s; usage: %s", strings.Join(pos[want:], " "), usage)
+	}
+	return pos, nil
+}
+
+// argFail reports a usage error consistently.
+func argFail(err error) int {
+	fmt.Fprintln(os.Stderr, "error:", err)
+	return 2
+}
+
 func cmdSubmit(cfg *config.Config, args []string) int {
-	fs := flag.NewFlagSet("submit", flag.ExitOnError)
+	fs := flag.NewFlagSet("submit", flag.ContinueOnError)
 	target := fs.String("target", "", "target key from sdlc.yaml targets")
 	title := fs.String("title", "", "issue title")
 	body := fs.String("body", "", "issue body text")
 	file := fs.String("file", "", "read issue body from this file (first line becomes the title when --title is empty)")
-	fs.Parse(args)
+	if _, err := parseArgs(fs, args, 0,
+		`sdlc submit --target <key> --title "..." (--body "..." | --file issue.md)`); err != nil {
+		return argFail(err)
+	}
 
 	if *target == "" {
 		fmt.Fprintln(os.Stderr, "error: --target is required")
@@ -173,9 +214,11 @@ func cmdSubmit(cfg *config.Config, args []string) int {
 }
 
 func cmdRun(cfg *config.Config, args []string) int {
-	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	once := fs.Bool("once", false, "drain runnable work, then exit")
-	fs.Parse(args)
+	if _, err := parseArgs(fs, args, 0, "sdlc run [--once]"); err != nil {
+		return argFail(err)
+	}
 	st, err := openStore(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -230,7 +273,9 @@ func statusOne(cfg *config.Config, st *store.Store, id string) int {
 	fmt.Printf("%s  [%s]\n", j.ID, j.State)
 	fmt.Printf("  target:    %s\n  branch:    %s\n  worktree:  %s\n", j.Target, j.Branch, j.WorktreePath)
 	fmt.Printf("  title:     %s\n", j.IssueTitle)
-	fmt.Printf("  created:   %s   state entered: %s\n", j.CreatedAt.Local().Format(time.RFC3339), j.StateEnteredAt.Local().Format(time.RFC3339))
+	fmt.Printf("  created:   %s   state entered: %s (%s ago)\n",
+		j.CreatedAt.Local().Format(time.RFC3339), j.StateEnteredAt.Local().Format(time.RFC3339),
+		humanSince(j.StateEnteredAt))
 	if j.HoldReason != "" {
 		fmt.Printf("  hold:      %s\n", j.HoldReason)
 	}
@@ -241,6 +286,7 @@ func statusOne(cfg *config.Config, st *store.Store, id string) int {
 	fmt.Printf("  counters:  design_review=%d code_review=%d fixes=%d flake=%d release=%d agent_invocations=%d\n",
 		c.DesignReviewRounds, c.CodeReviewRounds, c.FixAttempts, c.FlakeRetries, c.ReleaseRetries, c.AgentInvocations)
 	fmt.Printf("  artifacts: %s\n", artifact.ArtifactsDir(cfg.Orchestrator.DataDir, j.ID))
+	printLastProgress(st, j)
 	switch j.State {
 	case "AWAITING_MERGE_APPROVAL":
 		fmt.Println("\n  ACTION NEEDED: review the change, then `sdlc approve " + j.ID + "` (or reject --reason)")
@@ -251,6 +297,24 @@ func statusOne(cfg *config.Config, st *store.Store, id string) int {
 		fmt.Println("\n  ACTION NEEDED: inspect artifacts/logs, then `sdlc resume " + j.ID + " [--to STATE]` or `sdlc cancel " + j.ID + "`")
 	}
 	return 0
+}
+
+// printLastProgress surfaces the most recent progress event. A state that
+// has been running for eight minutes should say what it is running; without
+// it, "in flight" and "hung" are indistinguishable from the outside.
+func printLastProgress(st *store.Store, j *store.Job) {
+	evs, err := st.ListEvents(j.ID)
+	if err != nil {
+		return
+	}
+	for i := len(evs) - 1; i >= 0; i-- {
+		e := evs[i]
+		if e.Kind != "progress" {
+			continue
+		}
+		fmt.Printf("  running:   %s (%s ago)  %s\n", e.State, humanSince(e.CreatedAt), truncate(e.Detail, 90))
+		return
+	}
 }
 
 func printApprovalContext(cfg *config.Config, j *store.Job) {
@@ -287,16 +351,16 @@ func gateFor(state string) string {
 }
 
 func cmdDecision(cfg *config.Config, args []string, decision string) int {
-	fs := flag.NewFlagSet(decision, flag.ExitOnError)
+	fs := flag.NewFlagSet(decision, flag.ContinueOnError)
 	note := fs.String("note", "", "note recorded with the approval")
 	reason := fs.String("reason", "", "reason (required for reject)")
 	cancelFlag := fs.Bool("cancel", false, "on reject: cancel the job instead of sending it back to FIXING")
-	fs.Parse(args)
-	if fs.NArg() < 1 {
-		fmt.Fprintf(os.Stderr, "usage: sdlc %s <JOB-ID>\n", decision)
-		return 2
+	pos, err := parseArgs(fs, args, 1,
+		fmt.Sprintf("sdlc %s <JOB-ID> [--note \"...\"] [--reason \"...\"] [--cancel]", decision))
+	if err != nil {
+		return argFail(err)
 	}
-	id := fs.Arg(0)
+	id := pos[0]
 	if decision == "reject" && *reason == "" {
 		fmt.Fprintln(os.Stderr, "error: reject requires --reason")
 		return 2
@@ -330,34 +394,42 @@ func cmdDecision(cfg *config.Config, args []string, decision string) int {
 }
 
 func cmdControl(cfg *config.Config, args []string, gate string) int {
-	if len(args) < 1 {
-		fmt.Fprintf(os.Stderr, "usage: sdlc %s <JOB-ID>\n", gate)
-		return 2
+	fs := flag.NewFlagSet(gate, flag.ContinueOnError)
+	pos, err := parseArgs(fs, args, 1, fmt.Sprintf("sdlc %s <JOB-ID>", gate))
+	if err != nil {
+		return argFail(err)
 	}
+	id := pos[0]
 	st, err := openStore(cfg)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
 	defer st.Close()
-	if _, err := st.GetJob(args[0]); err != nil {
-		fmt.Fprintln(os.Stderr, "error: job not found:", args[0])
+	if _, err := st.GetJob(id); err != nil {
+		fmt.Fprintln(os.Stderr, "error: job not found:", id)
 		return 1
 	}
-	if err := st.AddApproval(&store.Approval{JobID: args[0], Gate: gate, Decision: gate}); err != nil {
+	if err := st.AddApproval(&store.Approval{JobID: id, Gate: gate, Decision: gate}); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
-	fmt.Printf("%s %s requested; the engine will act on its next tick\n", args[0], gate)
+	fmt.Printf("%s %s requested; the engine will act on its next tick\n", id, gate)
 	return 0
 }
 
 func cmdResume(cfg *config.Config, args []string) int {
-	fs := flag.NewFlagSet("resume", flag.ExitOnError)
+	fs := flag.NewFlagSet("resume", flag.ContinueOnError)
 	to := fs.String("to", "", "state to resume into (default: the state the job was in before the hold)")
-	fs.Parse(args)
-	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: sdlc resume <JOB-ID> [--to STATE]")
+	note := fs.String("note", "", "instruction handed to the agent in the resumed state (e.g. \"those fixtures are stale, update them\")")
+	pos, err := parseArgs(fs, args, 1, `sdlc resume <JOB-ID> [--to STATE] [--note "..."]`)
+	if err != nil {
+		return argFail(err)
+	}
+	id := pos[0]
+	if *to != "" && !engine.IsResumableState(*to) {
+		fmt.Fprintf(os.Stderr, "error: --to %q is not a state a job can be resumed into\n  valid: %s\n",
+			*to, strings.Join(engine.ResumableStates(), ", "))
 		return 2
 	}
 	st, err := openStore(cfg)
@@ -366,22 +438,28 @@ func cmdResume(cfg *config.Config, args []string) int {
 		return 1
 	}
 	defer st.Close()
-	if _, err := st.GetJob(fs.Arg(0)); err != nil {
-		fmt.Fprintln(os.Stderr, "error: job not found:", fs.Arg(0))
+	if _, err := st.GetJob(id); err != nil {
+		fmt.Fprintln(os.Stderr, "error: job not found:", id)
 		return 1
 	}
-	if err := st.AddApproval(&store.Approval{JobID: fs.Arg(0), Gate: "resume", Decision: "resume", Reason: *to}); err != nil {
+	if err := st.AddApproval(&store.Approval{
+		JobID: id, Gate: "resume", Decision: "resume", Reason: *to, Note: *note,
+	}); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
-	fmt.Printf("%s resume requested; the engine will act on its next tick\n", fs.Arg(0))
+	fmt.Printf("%s resume requested; the engine will act on its next tick\n", id)
+	if *note != "" {
+		fmt.Println("  the note will be handed to the agent in the resumed state")
+	}
 	return 0
 }
 
 func cmdEvents(cfg *config.Config, args []string) int {
-	if len(args) < 1 {
-		fmt.Fprintln(os.Stderr, "usage: sdlc events <JOB-ID>")
-		return 2
+	fs := flag.NewFlagSet("events", flag.ContinueOnError)
+	pos, err := parseArgs(fs, args, 1, "sdlc events <JOB-ID>")
+	if err != nil {
+		return argFail(err)
 	}
 	st, err := openStore(cfg)
 	if err != nil {
@@ -389,7 +467,7 @@ func cmdEvents(cfg *config.Config, args []string) int {
 		return 1
 	}
 	defer st.Close()
-	evs, err := st.ListEvents(args[0])
+	evs, err := st.ListEvents(pos[0])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
@@ -414,14 +492,13 @@ func cmdEvents(cfg *config.Config, args []string) int {
 }
 
 func cmdLogs(cfg *config.Config, args []string) int {
-	fs := flag.NewFlagSet("logs", flag.ExitOnError)
+	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
 	last := fs.Bool("last", false, "print the tail of the most recent log")
-	fs.Parse(args)
-	if fs.NArg() < 1 {
-		fmt.Fprintln(os.Stderr, "usage: sdlc logs <JOB-ID> [--last]")
-		return 2
+	pos, err := parseArgs(fs, args, 1, "sdlc logs <JOB-ID> [--last]")
+	if err != nil {
+		return argFail(err)
 	}
-	id := fs.Arg(0)
+	id := pos[0]
 	logsDir := artifact.LogsDir(cfg.Orchestrator.DataDir, id)
 	artDir := artifact.ArtifactsDir(cfg.Orchestrator.DataDir, id)
 	fmt.Println("artifacts:", artDir)

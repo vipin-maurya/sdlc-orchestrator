@@ -23,6 +23,12 @@ type Cmd struct {
 	Timeout time.Duration     // 0 = no timeout
 	LogPath string            // "" = discard; stdout+stderr interleaved
 	Stdin   string            // literal stdin content ("" = none)
+	// StderrSeparate keeps stderr out of RunCapture's returned string on
+	// success, so callers that PARSE stdout are not fed diagnostics. Set it
+	// for anything machine-read (git plumbing); leave it off for logs, where
+	// interleaving is what you want. On a non-zero exit stderr is appended
+	// anyway, so error messages keep their detail. Ignored by Run.
+	StderrSeparate bool
 }
 
 type Result struct {
@@ -110,22 +116,35 @@ func RunCapture(ctx context.Context, c Cmd, maxBytes int64) (Result, string, err
 		w = &limitedWriter{w: &sb, n: maxBytes}
 	}
 	cmd.Stdout = w
-	cmd.Stderr = w
+	var errb strings.Builder
+	if c.StderrSeparate {
+		cmd.Stderr = &limitedWriter{w: &errb, n: 1 << 16}
+	} else {
+		cmd.Stderr = w
+	}
 	start := time.Now()
 	err := cmd.Run()
 	res := Result{Duration: time.Since(start)}
 	out := sb.String()
+	// Failed commands get their stderr back: the caller is reporting, not
+	// parsing. Successful ones keep stdout clean.
+	withErr := func() string {
+		if !c.StderrSeparate || errb.Len() == 0 {
+			return out
+		}
+		return out + errb.String()
+	}
 	if ctx.Err() == context.DeadlineExceeded {
 		res.TimedOut = true
 		res.ExitCode = -1
-		return res, out, nil
+		return res, withErr(), nil
 	}
 	if err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {
 			res.ExitCode = ee.ExitCode()
-			return res, out, nil
+			return res, withErr(), nil
 		}
-		return res, out, err
+		return res, withErr(), err
 	}
 	return res, out, nil
 }

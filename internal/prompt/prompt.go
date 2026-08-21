@@ -36,6 +36,12 @@ type Ctx struct {
 	Classification string
 	FixHint        string
 	RejectReason   string
+
+	// Verify pass only: which finding this verifier is testing and where its
+	// verdict must be written. Round/MaxRounds carry the vote index and the
+	// vote count, so each verifier knows it is one of several.
+	FindingID  string
+	OutputPath string
 }
 
 var defaults = map[string]string{
@@ -46,6 +52,7 @@ var defaults = map[string]string{
 	config.StAnalyzing:    "analyzing.md",
 	config.StFixing:       "fixing.md",
 	config.StFinalReview:  "final_review.md",
+	config.StVerifying:    "verify_finding.md",
 }
 
 // Render produces the prompt for state. overridePath ("" = embedded default)

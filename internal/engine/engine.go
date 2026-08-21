@@ -237,9 +237,27 @@ func (e *Engine) handleControls(ctx context.Context, j *store.Job) error {
 				e.logger.Printf("%s: resume requested but no prior state recorded", j.ID)
 				return nil
 			}
+			if !IsResumableState(to) {
+				e.logger.Printf("%s: refusing to resume into %q (not a runnable state)", j.ID, to)
+				e.event(j, "note", map[string]any{"resume_rejected": to, "valid": ResumableStates()})
+				return nil
+			}
 			j.ResumeAfter = time.Time{}
 			j.HoldReason = ""
-			e.event(j, "approval", map[string]any{"gate": "resume", "to": to})
+			detail := map[string]any{"gate": "resume", "to": to}
+			// A note is an instruction addressed to the agent, not to the
+			// orchestrator. It rides the same channel a merge-gate rejection
+			// uses, which is the one mode where the FIXING prompt drops its
+			// classification-derived restrictions and asks the agent to do
+			// what the human said. Clearing LastAnalysis is what scopes the
+			// grant to this one attempt.
+			if note := strings.TrimSpace(a.Note); note != "" {
+				j.Counters.HumanRejectReason = note
+				j.Counters.FixSource = "human"
+				j.Counters.LastAnalysis = ""
+				detail["note"] = note
+			}
+			e.event(j, "approval", detail)
 			e.transition(j, to, "resumed by user")
 		} else {
 			// Not held: consume so it doesn't linger.
@@ -310,6 +328,18 @@ func (e *Engine) step(ctx context.Context, j *store.Job) {
 		}
 	}
 
+	// The branch can move without the orchestrator: a human inspecting an
+	// escalated job commits a fix on it. Nothing else notices — HeadSHA is
+	// written only by our own commit() — so every downstream "what did the
+	// agent change since state entry" diff would charge those commits to the
+	// agent and the test-file guard would roll them back. Re-read the branch
+	// before dispatching so the record matches reality.
+	if j.State != SCreated && needsWorktreeReconcile(j.State) {
+		if err := jc.syncHead(ctx); err != nil {
+			e.logger.Printf("%s: head resync: %v", j.ID, err)
+		}
+	}
+
 	// Agent-invocation budget guardrail (SPEC §13.5).
 	if isAgentState(j.State) && j.Counters.AgentInvocations >= e.cfg.Limits.MaxAgentInvocationsPerJob {
 		e.hold(j, SEscalated, fmt.Sprintf("agent budget exhausted (%d invocations)", j.Counters.AgentInvocations))
@@ -357,6 +387,10 @@ func (e *Engine) step(ctx context.Context, j *store.Job) {
 			e.transition(j, SBlockedQuota, fmt.Sprintf("quota/rate limit on backend %s", q.backend))
 			return
 		}
+		// Whatever the state produced before it failed is exactly what the
+		// operator is about to inspect, and a dirty worktree is one reconcile
+		// away from deletion. Commit it before parking the job.
+		jc.preserveWork(ctx, herr)
 		if h, ok := herr.(holdErr); ok {
 			e.hold(j, h.state, h.reason)
 			return

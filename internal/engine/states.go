@@ -16,6 +16,9 @@ const (
 	SAnalyzing    = config.StAnalyzing
 	SFixing       = config.StFixing
 	SFinalReview  = config.StFinalReview
+	// SVerifying is a configuration key, not a pipeline state: the verify
+	// pass runs inside the three review states, never as a state of its own.
+	SVerifying = config.StVerifying
 	SAwaitMerge   = "AWAITING_MERGE_APPROVAL"
 	SMerging      = "MERGING"
 	SAwaitRelease = "AWAITING_RELEASE_APPROVAL"
@@ -52,6 +55,28 @@ func isParked(s string) bool {
 	switch s {
 	case SAwaitMerge, SAwaitRelease:
 		return true
+	}
+	return false
+}
+
+// resumable lists the states `sdlc resume --to` accepts, in pipeline order.
+// A held job can only re-enter a state that actually runs work; sending it to
+// a terminal, parked or held state would either do nothing or wedge it.
+var resumable = []string{
+	SPlanning, SDesignReview, SImplementing, SCodeReview,
+	SBuilding, STesting, SFlakeCheck, SAnalyzing, SFixing, SFinalReview,
+	SMerging, SReleasing,
+}
+
+// ResumableStates returns the states a job may be resumed into.
+func ResumableStates() []string { return append([]string{}, resumable...) }
+
+// IsResumableState reports whether s is a valid `sdlc resume --to` target.
+func IsResumableState(s string) bool {
+	for _, r := range resumable {
+		if s == r {
+			return true
+		}
 	}
 	return false
 }

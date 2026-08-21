@@ -48,12 +48,16 @@ const (
 	StAnalyzing    = "ANALYZING"
 	StFixing       = "FIXING"
 	StFinalReview  = "FINAL_REVIEW"
+	// StVerifying is not a state the pipeline moves through. It configures the
+	// agent that reviews the reviewer: the verify pass runs inside
+	// DESIGN_REVIEW, CODE_REVIEW and FINAL_REVIEW, once per gating finding.
+	StVerifying = "VERIFYING"
 )
 
 // AgentStates lists every state that must have an entry under `states:`.
 var AgentStates = []string{
 	StPlanning, StDesignReview, StImplementing, StCodeReview,
-	StAnalyzing, StFixing, StFinalReview,
+	StAnalyzing, StFixing, StFinalReview, StVerifying,
 }
 
 type Config struct {
@@ -98,6 +102,16 @@ type Limits struct {
 	MaxAgentInvocationsPerJob int     `yaml:"max_agent_invocations_per_job"`
 	LogExcerptLines          int      `yaml:"log_excerpt_lines"`
 	LogErrorPatterns         []string `yaml:"log_error_patterns"`
+	// VerifyVotes is how many independent verifiers each gating review finding
+	// is put to before it is allowed to stop the pipeline. 0 disables the
+	// verify pass entirely and every finding gates on the reviewer's word.
+	// Only findings at or above the gate threshold are ever verified — a clean
+	// review, the common case, costs nothing.
+	VerifyVotes int `yaml:"verify_votes"`
+	// VerifyMinConfirm is how many of those votes must confirm for the finding
+	// to survive at its stated severity. Below it, the finding is downgraded
+	// to a nit and kept in the artifact with its refutations attached.
+	VerifyMinConfirm int `yaml:"verify_min_confirm"`
 }
 
 type Resources struct {
@@ -168,6 +182,15 @@ type Policies struct {
 	ProtectTestsOnCodeBugFix bool     `yaml:"protect_tests_on_code_bug_fix"`
 	TestFileGlobs            []string `yaml:"test_file_globs"`
 	ReviewerDiffMustBeEmpty  bool     `yaml:"reviewer_diff_must_be_empty"`
+	// *BlocksAt is the lowest finding severity that stops the pipeline at each
+	// review gate: blocker | major | minor | nit. Findings below the threshold
+	// never block, but they are still forwarded to the next agent rather than
+	// discarded. All three default to "blocker" so an existing config keeps
+	// its behavior; sdlc.example.yaml sets design review to "major", since
+	// that loop is one cheap review round against a whole implementation.
+	DesignReviewBlocksAt string `yaml:"design_review_blocks_at"`
+	CodeReviewBlocksAt   string `yaml:"code_review_blocks_at"`
+	FinalReviewBlocksAt  string `yaml:"final_review_blocks_at"`
 }
 
 type Git struct {
@@ -254,6 +277,8 @@ func Default() *Config {
 			MaxAgentInvocationsPerJob: 40,
 			LogExcerptLines:           200,
 			LogErrorPatterns:          []string{`(?i)error`, `(?i)exception`, `FAILED`},
+			VerifyVotes:               3,
+			VerifyMinConfirm:          2,
 		},
 		Resources: Resources{
 			GradleSlots: 1,
@@ -311,6 +336,11 @@ func Default() *Config {
 			StAnalyzing:    {Agent: "sonnet", Timeout: Duration(10 * time.Minute), DisallowedTools: []string{"Edit", "NotebookEdit", "Bash"}},
 			StFixing:       {Agent: "gemini", Timeout: Duration(45 * time.Minute)},
 			StFinalReview:  {Agent: "opus", Timeout: Duration(20 * time.Minute), DisallowedTools: []string{"Edit", "NotebookEdit", "Bash"}, MustDifferBackendFrom: StImplementing},
+			// Verifiers keep Bash: the rule that refutes most false findings is
+			// "check the resolved dependency, do not answer from memory", and
+			// that means unzipping a jar or reading the dependency cache. They
+			// still may not edit the tree — the clean-tree check enforces it.
+			StVerifying: {Agent: "opus", Timeout: Duration(15 * time.Minute), DisallowedTools: []string{"Edit", "NotebookEdit"}},
 		},
 		Policies: Policies{
 			ProtectedBranches:        []string{"main", "master"},
@@ -319,6 +349,9 @@ func Default() *Config {
 				"**/src/test/**", "**/src/androidTest/**", "**/*Test.kt", "**/*Test.java",
 			},
 			ReviewerDiffMustBeEmpty: true,
+			DesignReviewBlocksAt:    "blocker",
+			CodeReviewBlocksAt:      "blocker",
+			FinalReviewBlocksAt:     "blocker",
 		},
 		Git: Git{CleanupWorktrees: "on_success"},
 	}
@@ -509,6 +542,17 @@ func (c *Config) Validate() error {
 	default:
 		fail("git.cleanup_worktrees must be on_success|always|never, got %q", c.Git.CleanupWorktrees)
 	}
+	for key, sev := range map[string]string{
+		"design_review_blocks_at": c.Policies.DesignReviewBlocksAt,
+		"code_review_blocks_at":   c.Policies.CodeReviewBlocksAt,
+		"final_review_blocks_at":  c.Policies.FinalReviewBlocksAt,
+	} {
+		switch sev {
+		case "blocker", "major", "minor", "nit":
+		default:
+			fail("policies.%s must be blocker|major|minor|nit, got %q", key, sev)
+		}
+	}
 	for name, b := range c.Backends {
 		switch b.Kind {
 		case "claude", "agy":
@@ -560,6 +604,18 @@ func (c *Config) Validate() error {
 		}
 		if !found {
 			fail("states.%s is not an agent state (valid: %s)", name, strings.Join(AgentStates, ", "))
+		}
+	}
+	if c.Limits.VerifyVotes < 0 {
+		fail("limits.verify_votes must be >= 0 (0 disables the verify pass)")
+	}
+	if c.Limits.VerifyVotes > 0 {
+		if c.Limits.VerifyMinConfirm < 1 {
+			fail("limits.verify_min_confirm must be >= 1 when verify_votes > 0")
+		}
+		if c.Limits.VerifyMinConfirm > c.Limits.VerifyVotes {
+			fail("limits.verify_min_confirm (%d) cannot exceed limits.verify_votes (%d): no finding could ever survive",
+				c.Limits.VerifyMinConfirm, c.Limits.VerifyVotes)
 		}
 	}
 	for _, p := range c.Limits.LogErrorPatterns {

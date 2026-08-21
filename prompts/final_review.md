@@ -29,9 +29,14 @@ Verify the complete, final change against the ORIGINAL issue and the specificati
 
 # Severity calibration
 
-- `blocker`: this change must not be merged as-is.
+- `blocker`: this change must not be merged as-is. This includes anything that reads as correct
+  in the diff but will not take effect when the code actually runs — trace the data path for
+  each acceptance criterion rather than trusting that plausible-looking code works.
 - `major`: should be noted to the human approver but does not block.
 - `minor` / `nit`: informational.
+
+Non-blocking findings are shown to the human approver at the merge gate, so they are worth
+recording accurately rather than inflating or omitting.
 
 Only report real findings; an empty list is the correct answer for a sound change.
 

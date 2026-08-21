@@ -12,10 +12,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/vipinm/sdlc-orchestrator/internal/artifact"
 	"github.com/vipinm/sdlc-orchestrator/internal/config"
 	"github.com/vipinm/sdlc-orchestrator/internal/store"
 )
@@ -31,6 +35,10 @@ func TestMain(m *testing.M) {
 }
 
 // --- fake agent ----------------------------------------------------------
+
+// designFindingText is the description the fake design reviewer emits under
+// FAKE_DESIGN_FINDING; tests match on it to prove the finding travelled.
+const designFindingText = "savedStateHandle written to the wrong nav graph entry"
 
 func runFakeAgent(promptFile string) int {
 	data, err := os.ReadFile(promptFile)
@@ -57,12 +65,31 @@ func runFakeAgent(promptFile string) int {
 		f.Close()
 	}
 	switch {
+	// First: a verifier's prompt names other roles in passing ("about to send
+	// an implementation agent to rework working code"), so the substring
+	// heuristics below would claim it.
+	case strings.Contains(prompt, "verification agent"):
+		return runFakeVerifier(prompt)
 	case strings.Contains(prompt, "planning agent"):
 		writeOut("spec.json", `{"schema":"spec/1","issue_summary":"demo","approach":"edit app.txt",
 			"affected_files":["src/app.txt"],"acceptance_criteria":["app.txt updated"],
 			"error_paths":[],"out_of_scope":[],"compatibility_concerns":[]}`)
-		writeOut("plan.json", `{"schema":"plan/1","steps":[{"id":"S1","description":"edit","files":["src/app.txt"],"verification":"unit"}],"risks":[]}`)
+		// Two steps, one of them a verification step the orchestrator owns —
+		// the shape real plans have, and the one that exposed steps being
+		// dropped silently.
+		writeOut("plan.json", `{"schema":"plan/1","steps":[
+			{"id":"S1","description":"edit","files":["src/app.txt"],"verification":"app.txt contains the feature line"},
+			{"id":"S2","description":"suite green","files":[],"verification":"unit suite passes"}],"risks":[]}`)
 	case strings.Contains(prompt, "design reviewer"):
+		// FAKE_DESIGN_FINDING: report one finding of the given severity every
+		// round, so a test can exercise the configured blocking threshold.
+		if sev := os.Getenv("FAKE_DESIGN_FINDING"); sev != "" {
+			writeOut("review.json", `{"schema":"review/1","reviewed":"spec",
+				"findings":[{"id":"F1","severity":"`+sev+`",
+				"description":"`+designFindingText+`","recommendation":"use getBackStackEntry"}],
+				"summary":"one finding"}`)
+			return 0
+		}
 		marker := filepath.Join(os.Getenv("FAKE_MARKER_DIR"), "design_blocked")
 		if os.Getenv("FAKE_DESIGN_BLOCK_ONCE") == "1" {
 			if _, err := os.Stat(marker); err != nil {
@@ -75,12 +102,54 @@ func runFakeAgent(promptFile string) int {
 		}
 		writeOut("review.json", emptyReview("spec"))
 	case strings.Contains(prompt, "implementation agent"):
+		// When a design review produced findings, the orchestrator must have
+		// staged the artifact the prompt points at, not just inlined the JSON.
+		if os.Getenv("FAKE_DESIGN_FINDING") != "" {
+			if _, err := os.Stat(filepath.Join(".sdlc", "context", "design_review.json")); err != nil {
+				fmt.Fprintln(os.Stderr, "fakeagent: design_review.json not staged:", err)
+				return 1
+			}
+		}
+		steps := `[{"id":"S1","status":"done"},
+			{"id":"S2","status":"skipped","note":"orchestrator-verified"}]`
+		claimed := `["src/app.txt"]`
+		// FAKE_IMPL_SKIP_STEP: drop a plan step from the report entirely.
+		if os.Getenv("FAKE_IMPL_SKIP_STEP") == "1" {
+			steps = `[{"id":"S1","status":"done"}]`
+		}
+		// FAKE_IMPL_PHANTOM: claim a file that was never touched.
+		if os.Getenv("FAKE_IMPL_PHANTOM") == "1" {
+			claimed = `["src/app.txt","src/never_touched.txt"]`
+		}
+		// FAKE_IMPL_UNREPORTED: change a second file and leave it off the report.
+		if os.Getenv("FAKE_IMPL_UNREPORTED") == "1" {
+			appendFile("src/extra.txt", "substituted work")
+		}
+		impl := `{"schema":"implementation/1","summary":"implemented",
+			"files_changed":` + claimed + `,"tests_added_or_changed":[],
+			"steps_completed":` + steps + `,"test_change_requested":null}`
+		// FAKE_IMPL_BAD_FIRST: fail the post-condition on the first attempt
+		// only, and edit the source exactly once — so the retry runs against a
+		// worktree that already holds the complete implementation.
+		if os.Getenv("FAKE_IMPL_BAD_FIRST") == "1" {
+			marker := filepath.Join(os.Getenv("FAKE_MARKER_DIR"), "impl_failed_once")
+			if _, err := os.Stat(marker); err != nil {
+				_ = os.WriteFile(marker, []byte("1"), 0o644)
+				appendFile("src/app.txt", "implemented feature")
+				writeOut("implementation.json", `{"schema":"implementation/1","summary":""}`)
+				return 0
+			}
+			writeOut("implementation.json", impl)
+			return 0
+		}
 		appendFile("src/app.txt", "implemented feature")
 		if os.Getenv("FAKE_IMPL_BREAK") == "1" {
 			_ = os.WriteFile("fail_unit", []byte("broken"), 0o644)
 		}
-		writeOut("implementation.json", `{"schema":"implementation/1","summary":"implemented",
-			"files_changed":["src/app.txt"],"tests_added_or_changed":[],"test_change_requested":null}`)
+		if os.Getenv("FAKE_IMPL_BOM") == "1" {
+			impl = string(rune(0xFEFF)) + impl // UTF-8 BOM, as a Windows agent emits
+		}
+		writeOut("implementation.json", impl)
 	case strings.Contains(prompt, "code reviewer"):
 		writeOut("review.json", emptyReview("diff"))
 	case strings.Contains(prompt, "failure-analysis agent"):
@@ -103,6 +172,55 @@ func runFakeAgent(promptFile string) int {
 		writeOut("review.json", emptyReview("final"))
 	default:
 		fmt.Fprintln(os.Stderr, "fakeagent: unrecognized role in prompt")
+		return 1
+	}
+	fmt.Println(`{"model":"fake-model","usage":{"input_tokens":10,"output_tokens":5}}`)
+	return 0
+}
+
+// verdictPathRe pulls the output path the orchestrator assigned this verifier
+// out of the rendered prompt — the same way a real agent would read it.
+var verdictPathRe = regexp.MustCompile(`\.sdlc/verdicts/([A-Za-z0-9_-]+)\.v(\d+)\.json`)
+
+// runFakeVerifier impersonates one verifier in the verify pass.
+//
+// FAKE_VERDICTS is a comma-separated list read by vote index, e.g.
+// "refuted,refuted,confirmed" — so a test can script an exact 1-of-3 outcome
+// rather than hoping for one. "none" makes that verifier produce no file at
+// all, which is how a dropped vote is exercised.
+func runFakeVerifier(prompt string) int {
+	m := verdictPathRe.FindStringSubmatch(prompt)
+	if m == nil {
+		fmt.Fprintln(os.Stderr, "fakeverifier: no verdict path in prompt")
+		return 1
+	}
+	rel, findingID, vote := m[0], m[1], m[2]
+	idx, _ := strconv.Atoi(vote)
+
+	want := "refuted"
+	if list := os.Getenv("FAKE_VERDICTS"); list != "" {
+		parts := strings.Split(list, ",")
+		if idx >= 1 && idx <= len(parts) {
+			want = strings.TrimSpace(parts[idx-1])
+		} else {
+			want = strings.TrimSpace(parts[len(parts)-1])
+		}
+	}
+	if want == "none" {
+		return 1 // wrote nothing: the vote is dropped, not retried
+	}
+	// Each verifier must have been handed the finding itself, or it has
+	// nothing to argue about.
+	if !strings.Contains(prompt, designFindingText) && !strings.Contains(prompt, "missing edge case") {
+		fmt.Fprintln(os.Stderr, "fakeverifier: prompt carries no finding")
+		return 1
+	}
+	body := `{"schema":"verdict/1","finding_id":"` + findingID + `","verdict":"` + want + `",
+		"evidence":"disassembled navigation-runtime-2.6.0.jar from the gradle cache",
+		"reasoning":"getPreviousBackStackEntry skips NavGraph entries in this version"}`
+	_ = os.MkdirAll(filepath.Dir(rel), 0o755)
+	if err := os.WriteFile(rel, []byte(body), 0o644); err != nil {
+		fmt.Fprintln(os.Stderr, "fakeverifier:", err)
 		return 1
 	}
 	fmt.Println(`{"model":"fake-model","usage":{"input_tokens":10,"output_tokens":5}}`)
@@ -363,6 +481,8 @@ func TestDesignReviewRejectLoop(t *testing.T) {
 	e := newEnv(t)
 	t.Setenv("FAKE_DESIGN_BLOCK_ONCE", "1")
 	t.Setenv("FAKE_MARKER_DIR", t.TempDir())
+	// The blocker is real, so the verifiers uphold it and the loop runs.
+	t.Setenv("FAKE_VERDICTS", "confirmed,confirmed,confirmed")
 	j := e.submit("design gets rejected once")
 
 	e.runEngine()
@@ -470,5 +590,569 @@ func TestCrashResumeReconcilesWorktree(t *testing.T) {
 	data, _ := os.ReadFile(filepath.Join(wt, "src", "app.txt"))
 	if strings.Contains(string(data), "garbage") {
 		t.Error("partial work not discarded on resume")
+	}
+}
+
+// promptsFor returns the rendered prompts for a state, in dispatch order.
+func (e *env) promptsFor(id, state string) []string {
+	e.t.Helper()
+	dir := filepath.Join(e.cfg.Orchestrator.DataDir, "jobs", id, "prompts")
+	matches, err := filepath.Glob(filepath.Join(dir, "*_"+state+".md"))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	sort.Strings(matches) // names are zero-padded sequence numbers
+	var out []string
+	for _, m := range matches {
+		data, err := os.ReadFile(m)
+		if err != nil {
+			e.t.Fatal(err)
+		}
+		out = append(out, string(data))
+	}
+	return out
+}
+
+// verifierPrompts returns the prompts handed to verify-pass agents. They are
+// named <seq>_VERIFYING_<finding>_v<n>.md, so promptsFor's exact-suffix glob
+// does not see them.
+func (e *env) verifierPrompts(id string) []string {
+	e.t.Helper()
+	dir := filepath.Join(e.cfg.Orchestrator.DataDir, "jobs", id, "prompts")
+	matches, err := filepath.Glob(filepath.Join(dir, "*_VERIFYING_*.md"))
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	sort.Strings(matches)
+	var out []string
+	for _, m := range matches {
+		data, err := os.ReadFile(m)
+		if err != nil {
+			e.t.Fatal(err)
+		}
+		out = append(out, string(data))
+	}
+	return out
+}
+
+// A BOM-prefixed artifact must load on the first attempt. Before ReadJSON
+// stripped it, a complete implementation was scored as a post-condition
+// failure and the whole state re-run.
+func TestBOMPrefixedArtifactNeedsNoRetry(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_IMPL_BOM", "1")
+	j := e.submit("bom artifact")
+
+	e.runEngine()
+	if got := e.jobState(j.ID); got.State != SAwaitMerge {
+		t.Fatalf("state=%s hold=%q", got.State, got.HoldReason)
+	}
+	if n := len(e.promptsFor(j.ID, SImplementing)); n != 1 {
+		t.Errorf("IMPLEMENTING dispatched %d time(s), want 1 — the BOM caused a retry", n)
+	}
+}
+
+// eventDetails returns the Detail JSON of every event for a job, so a test can
+// assert on the notes the orchestrator recorded.
+func (e *env) eventDetails(id string) string {
+	e.t.Helper()
+	evs, err := e.st.ListEvents(id)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	var b strings.Builder
+	for _, ev := range evs {
+		b.WriteString(ev.Detail)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+// A plan step the implementer says nothing about fails the state. Silence is
+// indistinguishable from forgetting, and JOB-1 lost both of its verification
+// steps this way — steps_completed was not in the schema, so it was decoded
+// away and nothing noticed.
+func TestUnaccountedPlanStepFailsImplementing(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_IMPL_SKIP_STEP", "1")
+	j := e.submit("dropped step")
+
+	e.runEngine()
+	got := e.jobState(j.ID)
+	if got.State != SEscalated {
+		t.Fatalf("state=%s, want %s", got.State, SEscalated)
+	}
+	if !strings.Contains(got.HoldReason, "does not account for plan step(s) S2") {
+		t.Errorf("hold reason does not name the missing step: %q", got.HoldReason)
+	}
+}
+
+// A step reported as skipped WITH a note is a legitimate answer — the default
+// fake reports S2 that way — and it must be recorded where a human sees it.
+func TestSkippedStepPassesAndIsRecorded(t *testing.T) {
+	e := newEnv(t)
+	j := e.submit("skipped step")
+
+	e.runEngine()
+	if got := e.jobState(j.ID); got.State != SAwaitMerge {
+		t.Fatalf("state=%s hold=%q", got.State, got.HoldReason)
+	}
+	details := e.eventDetails(j.ID)
+	if !strings.Contains(details, "plan_steps_skipped") || !strings.Contains(details, "orchestrator-verified") {
+		t.Errorf("skipped step not recorded in the event log:\n%s", details)
+	}
+}
+
+// Claiming a file that was never modified fails the state: a self-report
+// nobody checks is worth nothing.
+func TestPhantomFileClaimFailsImplementing(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_IMPL_PHANTOM", "1")
+	j := e.submit("phantom claim")
+
+	e.runEngine()
+	got := e.jobState(j.ID)
+	if got.State != SEscalated {
+		t.Fatalf("state=%s, want %s", got.State, SEscalated)
+	}
+	if !strings.Contains(got.HoldReason, "src/never_touched.txt") {
+		t.Errorf("hold reason does not name the phantom file: %q", got.HoldReason)
+	}
+}
+
+// The converse is not a failure — substituting a file is often the right call —
+// but it must be visible rather than silent.
+func TestUnreportedChangeIsRecordedNotFailed(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_IMPL_UNREPORTED", "1")
+	j := e.submit("unreported change")
+
+	e.runEngine()
+	if got := e.jobState(j.ID); got.State != SAwaitMerge {
+		t.Fatalf("state=%s hold=%q, want %s", got.State, got.HoldReason, SAwaitMerge)
+	}
+	details := e.eventDetails(j.ID)
+	if !strings.Contains(details, "changed_but_unreported") || !strings.Contains(details, "src/extra.txt") {
+		t.Errorf("unreported change not recorded:\n%s", details)
+	}
+}
+
+// With design_review_blocks_at: major, a major finding must stop the pipeline.
+// JOB-1 is the case this pins: one major finding, a hardcoded blocker-only
+// gate, and the implementer went on to write exactly the bug it described.
+func TestDesignReviewBlocksAtConfiguredSeverity(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.Policies.DesignReviewBlocksAt = "major"
+	t.Setenv("FAKE_DESIGN_FINDING", "major")
+	// The finding is real: every verifier upholds it, so the gate must hold.
+	t.Setenv("FAKE_VERDICTS", "confirmed,confirmed,confirmed")
+	j := e.submit("major finding")
+
+	e.runEngine()
+	got := e.jobState(j.ID)
+	if got.State != SEscalated {
+		t.Fatalf("state=%s, want %s (the major finding should never clear the gate)", got.State, SEscalated)
+	}
+	if !strings.Contains(got.HoldReason, "at or above major") {
+		t.Errorf("hold reason does not name the threshold: %q", got.HoldReason)
+	}
+	if got.Counters.DesignReviewRounds != e.cfg.Limits.MaxDesignReviewRounds {
+		t.Errorf("design_review_rounds=%d, want %d", got.Counters.DesignReviewRounds, e.cfg.Limits.MaxDesignReviewRounds)
+	}
+	if !e.artifactExists(j.ID, "design_review.r2.json") {
+		t.Error("second design review round did not run")
+	}
+}
+
+// A finding below the threshold must not be discarded: it is handed to the
+// implementer, who is the last agent that will ever see it.
+func TestNonBlockingFindingsReachImplementer(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.Policies.DesignReviewBlocksAt = "blocker" // so "major" passes the gate
+	t.Setenv("FAKE_DESIGN_FINDING", "major")
+	j := e.submit("passing finding")
+
+	e.runEngine()
+	got := e.jobState(j.ID)
+	if got.State != SAwaitMerge {
+		t.Fatalf("state=%s hold=%q, want %s", got.State, got.HoldReason, SAwaitMerge)
+	}
+	if got.Counters.LastDesignReview != "design_review.r1.json" {
+		t.Errorf("last_design_review=%q, want design_review.r1.json", got.Counters.LastDesignReview)
+	}
+	prompts := e.promptsFor(j.ID, SImplementing)
+	if len(prompts) != 1 {
+		t.Fatalf("IMPLEMENTING dispatched %d time(s), want 1", len(prompts))
+	}
+	if !strings.Contains(prompts[0], designFindingText) {
+		t.Errorf("implementing prompt does not carry the finding:\n%s", prompts[0])
+	}
+}
+
+// The converse: a clean review must not decorate the prompt with an empty
+// findings section, and must leave no pointer behind.
+func TestCleanDesignReviewForwardsNothing(t *testing.T) {
+	e := newEnv(t)
+	j := e.submit("clean review")
+
+	e.runEngine()
+	if got := e.jobState(j.ID); got.Counters.LastDesignReview != "" {
+		t.Errorf("last_design_review=%q, want empty", got.Counters.LastDesignReview)
+	}
+	prompts := e.promptsFor(j.ID, SImplementing)
+	if len(prompts) != 1 {
+		t.Fatalf("IMPLEMENTING dispatched %d time(s), want 1", len(prompts))
+	}
+	if strings.Contains(prompts[0], "Design review:") {
+		t.Errorf("clean review still produced a findings section:\n%s", prompts[0])
+	}
+}
+
+// A retry must tell the agent what the failed attempt already did, so it
+// corrects the output file instead of re-applying its own edits.
+func TestRetryPromptDescribesWorktree(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_IMPL_BAD_FIRST", "1")
+	t.Setenv("FAKE_MARKER_DIR", t.TempDir())
+	j := e.submit("retry context")
+
+	e.runEngine()
+	if got := e.jobState(j.ID); got.State != SAwaitMerge {
+		t.Fatalf("state=%s hold=%q", got.State, got.HoldReason)
+	}
+	prompts := e.promptsFor(j.ID, SImplementing)
+	if len(prompts) != 2 {
+		t.Fatalf("IMPLEMENTING dispatched %d time(s), want 2", len(prompts))
+	}
+	if strings.Contains(prompts[0], "# IMPORTANT") {
+		t.Error("first-attempt prompt carries a retry block")
+	}
+	retry := prompts[1]
+	for _, want := range []string{
+		"retry 2 of",
+		"summary (non-empty",          // the actual post-condition failure, quoted
+		"keys actually present: schema, summary", // and what the file did contain
+		"already modified 1 file(s)",  // counted from the real worktree diff
+		"- src/app.txt",               // the file the failed attempt edited
+		"`.sdlc/implementation.json`", // the output it left behind
+	} {
+		if !strings.Contains(retry, want) {
+			t.Errorf("retry prompt missing %q\n---\n%s", want, retry)
+		}
+	}
+	// The source must have been edited exactly once: the retry was told not to
+	// redo the work, and the fake agent obeys.
+	wt := filepath.Join(e.repo, ".worktrees", j.ID)
+	data, _ := os.ReadFile(filepath.Join(wt, "src", "app.txt"))
+	if n := strings.Count(string(data), "implemented feature"); n != 1 {
+		t.Errorf("implementation applied %d times, want 1:\n%s", n, data)
+	}
+}
+
+// --- verify pass ----------------------------------------------------------
+
+// JOB-1's F1 replayed: a major finding, articulate and wrong. Two of three
+// verifiers refute it, so it must not gate — and the job must reach the merge
+// gate instead of burning its design-review rounds reworking a plan that was
+// already correct.
+func TestMajorityRefutedFindingDoesNotGate(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.Policies.DesignReviewBlocksAt = "major"
+	t.Setenv("FAKE_DESIGN_FINDING", "major")
+	t.Setenv("FAKE_VERDICTS", "refuted,refuted,confirmed") // 1 of 3 confirms; min is 2
+	j := e.submit("false positive")
+
+	e.runEngine()
+	got := e.jobState(j.ID)
+	if got.State != SAwaitMerge {
+		t.Fatalf("state=%s hold=%q, want %s — a refuted finding must not block", got.State, got.HoldReason, SAwaitMerge)
+	}
+	if got.Counters.DesignReviewRounds != 0 {
+		t.Errorf("design_review_rounds=%d, want 0: the gate should never have tripped", got.Counters.DesignReviewRounds)
+	}
+	if !e.artifactExists(j.ID, "design_review.r1.verified.json") {
+		t.Fatal("verified artifact not written")
+	}
+
+	// The finding survives in the record, downgraded and annotated — never
+	// deleted, so the next reader can see the question was already asked.
+	rev, err := artifact.LoadReview(filepath.Join(e.cfg.Orchestrator.DataDir, "jobs", j.ID,
+		"artifacts", "design_review.r1.verified.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rev.Findings) != 1 {
+		t.Fatalf("verified review has %d finding(s), want 1 (findings are annotated, not removed)", len(rev.Findings))
+	}
+	f := rev.Findings[0]
+	if f.Severity != artifact.DowngradedSeverity {
+		t.Errorf("severity=%q, want %q", f.Severity, artifact.DowngradedSeverity)
+	}
+	if f.Verification == nil {
+		t.Fatal("no verification record attached")
+	}
+	if f.Verification.OriginalSeverity != "major" {
+		t.Errorf("original_severity=%q, want major", f.Verification.OriginalSeverity)
+	}
+	if f.Verification.Confirmed != 1 || f.Verification.Refuted != 2 || f.Verification.Survived {
+		t.Errorf("verification = %+v, want 1 confirmed / 2 refuted / not survived", f.Verification)
+	}
+	if len(f.Verification.Verdicts) != 3 {
+		t.Errorf("kept %d verdict(s), want 3 — the refutations are the record", len(f.Verification.Verdicts))
+	}
+
+	details := e.eventDetails(j.ID)
+	if !strings.Contains(details, "verify_pass") {
+		t.Errorf("no verify_pass event recorded:\n%s", details)
+	}
+	// The implementer must be handed the verified copy, not the raw review:
+	// a dismissed finding without its refutation invites rework all over again.
+	if got.Counters.LastDesignReview != "design_review.r1.verified.json" {
+		t.Errorf("last_design_review=%q, want the verified artifact", got.Counters.LastDesignReview)
+	}
+}
+
+// Exactly minConfirm confirmations is enough: 2 of 3 upholds the finding and
+// the gate holds.
+func TestMinorityRefutationDoesNotSaveAFinding(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.Policies.DesignReviewBlocksAt = "major"
+	t.Setenv("FAKE_DESIGN_FINDING", "major")
+	t.Setenv("FAKE_VERDICTS", "confirmed,refuted,confirmed") // 2 of 3
+	j := e.submit("real finding")
+
+	e.runEngine()
+	got := e.jobState(j.ID)
+	if got.State != SEscalated {
+		t.Fatalf("state=%s, want %s — 2 of 3 confirmations must uphold the finding", got.State, SEscalated)
+	}
+	if !strings.Contains(got.HoldReason, "at or above major") {
+		t.Errorf("hold reason does not name the threshold: %q", got.HoldReason)
+	}
+}
+
+// A clean review must not invoke a single verifier. The pass is only worth
+// having if it is free in the common case.
+func TestVerifyPassSkippedWhenNothingGates(t *testing.T) {
+	e := newEnv(t)
+	j := e.submit("clean review")
+
+	e.runEngine()
+	if got := e.jobState(j.ID); got.State != SAwaitMerge {
+		t.Fatalf("state=%s hold=%q", got.State, got.HoldReason)
+	}
+	if n := len(e.verifierPrompts(j.ID)); n != 0 {
+		t.Errorf("%d verifier(s) invoked on a clean review, want 0", n)
+	}
+	if strings.Contains(e.eventDetails(j.ID), "verify_pass") {
+		t.Error("verify_pass event emitted with nothing to verify")
+	}
+}
+
+// Below-threshold findings are never voted on: spending tokens on a finding
+// that cannot change control flow is waste.
+func TestNonGatingFindingIsNotVerified(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.Policies.DesignReviewBlocksAt = "blocker" // so the major finding passes
+	t.Setenv("FAKE_DESIGN_FINDING", "major")
+	j := e.submit("non-gating finding")
+
+	e.runEngine()
+	if got := e.jobState(j.ID); got.State != SAwaitMerge {
+		t.Fatalf("state=%s hold=%q", got.State, got.HoldReason)
+	}
+	if n := len(e.verifierPrompts(j.ID)); n != 0 {
+		t.Errorf("%d verifier(s) invoked on a non-gating finding, want 0", n)
+	}
+}
+
+// Turning the pass off must restore the previous behaviour exactly: the
+// reviewer's word gates, unaudited.
+func TestVerifyVotesZeroDisablesThePass(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.Limits.VerifyVotes = 0
+	e.cfg.Policies.DesignReviewBlocksAt = "major"
+	t.Setenv("FAKE_DESIGN_FINDING", "major")
+	t.Setenv("FAKE_VERDICTS", "refuted,refuted,refuted") // would be refuted if asked
+	j := e.submit("verify off")
+
+	e.runEngine()
+	if got := e.jobState(j.ID); got.State != SEscalated {
+		t.Fatalf("state=%s, want %s with the verify pass disabled", got.State, SEscalated)
+	}
+	if n := len(e.verifierPrompts(j.ID)); n != 0 {
+		t.Errorf("%d verifier(s) invoked with verify_votes=0, want 0", n)
+	}
+}
+
+// A finding no verifier could rule on stays gating. Declining to decide is not
+// a refutation, and the conservative direction is to keep the block.
+func TestInconclusiveVerificationLeavesTheFindingGating(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.Policies.DesignReviewBlocksAt = "major"
+	t.Setenv("FAKE_DESIGN_FINDING", "major")
+	t.Setenv("FAKE_VERDICTS", "none,none,none")
+	j := e.submit("inconclusive")
+
+	e.runEngine()
+	got := e.jobState(j.ID)
+	if got.State != SEscalated {
+		t.Fatalf("state=%s, want %s", got.State, SEscalated)
+	}
+	if !strings.Contains(e.eventDetails(j.ID), "verify_inconclusive") {
+		t.Error("inconclusive verification not recorded")
+	}
+}
+
+// --- out-of-band commits --------------------------------------------------
+
+// A human commits on the job branch while the job is held — the normal way to
+// answer an escalation. The orchestrator must adopt those commits, not charge
+// them to the next agent and not roll them back.
+//
+// This is JOB-1's worst outcome: two human commits containing a verified fix
+// were attributed to the fix agent, tripped the test-file guard, and were
+// erased along with the agent's own work.
+func TestHumanCommitsOnJobBranchAreNotChargedToTheAgent(t *testing.T) {
+	e := newEnv(t)
+	// Drive the job to the JOB-1 escalation: unit tests fail, the failure is
+	// classified code_bug, and the fix agent reaches for a test file. The
+	// test-file guard discards that and escalates — which is correct, and is
+	// the point at which a human steps in.
+	t.Setenv("FAKE_IMPL_BREAK", "1")
+	t.Setenv("FAKE_ANALYSIS", "code_bug")
+	t.Setenv("FAKE_FIX_TOUCH_TEST", "1")
+	j := e.submit("human intervention")
+
+	e.runEngine()
+	before := e.jobState(j.ID)
+	if before.State != SEscalated {
+		t.Fatalf("state=%s hold=%q, want %s", before.State, before.HoldReason, SEscalated)
+	}
+
+	// The human answers the escalation the way people actually do: by editing
+	// the stale fixture and committing it on the job branch.
+	wt := filepath.Join(e.repo, ".worktrees", j.ID)
+	testFile := filepath.Join(wt, "tests", "app_test.txt")
+	data, _ := os.ReadFile(testFile)
+	if err := os.WriteFile(testFile, append(data, []byte("assert v2 (updated by hand)\n")...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, wt, "add", "-A")
+	git(t, wt, "commit", "-m", "human: update the stale fixture")
+	humanSHA := strings.TrimSpace(git(t, wt, "rev-parse", "HEAD"))
+	if humanSHA == before.HeadSHA {
+		t.Fatal("test setup: the human commit did not move the branch")
+	}
+
+	// Resume with a note — the channel that did not exist during JOB-1.
+	e.st.AddApproval(&store.Approval{
+		JobID: j.ID, Gate: "resume", Decision: "resume",
+		Reason: SFixing, Note: "those fixtures are stale; updating them is correct",
+	})
+	e.runEngine()
+
+	// Whatever the job did next, the human's commit must still be on the
+	// branch and their edit must still be in the file. Under the old stale
+	// baseline both were charged to the agent and reset away.
+	logOut := git(t, wt, "log", "--oneline")
+	if !strings.Contains(logOut, "human: update the stale fixture") {
+		t.Fatalf("the human commit was destroyed:\n%s", logOut)
+	}
+	body, _ := os.ReadFile(testFile)
+	if !strings.Contains(string(body), "updated by hand") {
+		t.Errorf("the human's edit was rolled back:\n%s", body)
+	}
+	// And the branch move must be recorded, not silently absorbed.
+	if details := e.eventDetails(j.ID); !strings.Contains(details, "head_sha_resynced") &&
+		!strings.Contains(details, "branch_advanced_outside_orchestrator") {
+		t.Errorf("branch movement was never recorded:\n%s", details)
+	}
+}
+
+// The note must reach the agent, and it must be scoped to one attempt: the
+// classification that made the previous prompt forbid test edits is cleared,
+// so the prompt renders its permissive branch instead.
+func TestResumeNoteReachesTheFixAgent(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_IMPL_BREAK", "1")
+	t.Setenv("FAKE_ANALYSIS", "code_bug")
+	t.Setenv("FAKE_FIX_TOUCH_TEST", "1")
+	j := e.submit("resume with a note")
+	e.runEngine()
+	if got := e.jobState(j.ID); got.State != SEscalated {
+		t.Fatalf("state=%s hold=%q, want %s", got.State, got.HoldReason, SEscalated)
+	}
+	beforeResume := len(e.promptsFor(j.ID, SFixing))
+
+	const note = "those four fixtures are stale, update them"
+	e.st.AddApproval(&store.Approval{
+		JobID: j.ID, Gate: "resume", Decision: "resume", Reason: SFixing, Note: note,
+	})
+	e.runEngine()
+
+	prompts := e.promptsFor(j.ID, SFixing)
+	if len(prompts) <= beforeResume {
+		t.Fatalf("FIXING did not run again after resume (%d prompts, was %d)", len(prompts), beforeResume)
+	}
+	resumed := prompts[beforeResume]
+	if !strings.Contains(resumed, note) {
+		t.Errorf("the fix prompt does not carry the operator's note:\n%s", resumed)
+	}
+	// Clearing LastAnalysis is what makes the grant real: with the code_bug
+	// classification still set, the prompt would render the forbidden branch
+	// again and the job would escalate identically.
+	if strings.Contains(resumed, "The classification is `code_bug`") {
+		t.Errorf("the note did not lift the code_bug restriction:\n%s", resumed)
+	}
+	if !strings.Contains(e.eventDetails(j.ID), note) {
+		t.Error("the note was not recorded in the event log")
+	}
+}
+
+// `resume --to` must refuse a state a job cannot actually run, rather than
+// wedging the job in it.
+func TestResumeRejectsANonRunnableState(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_IMPL_SKIP_STEP", "1") // escalates
+	j := e.submit("bad resume target")
+	e.runEngine()
+	if got := e.jobState(j.ID); got.State != SEscalated {
+		t.Fatalf("state=%s, want %s", got.State, SEscalated)
+	}
+
+	e.st.AddApproval(&store.Approval{JobID: j.ID, Gate: "resume", Decision: "resume", Reason: SCompleted})
+	e.runEngine()
+	got := e.jobState(j.ID)
+	if got.State != SEscalated {
+		t.Errorf("state=%s, want the job to stay %s", got.State, SEscalated)
+	}
+	if !strings.Contains(e.eventDetails(j.ID), "resume_rejected") {
+		t.Error("the rejected resume target was not recorded")
+	}
+}
+
+// An escalated state's output is what the operator has to read. It must be
+// committed, not left in a worktree that the next reconcile deletes.
+func TestEscalatedStateWorkIsCommitted(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_IMPL_SKIP_STEP", "1") // IMPLEMENTING edits src/app.txt, then fails
+	j := e.submit("escalated work")
+
+	e.runEngine()
+	got := e.jobState(j.ID)
+	if got.State != SEscalated {
+		t.Fatalf("state=%s, want %s", got.State, SEscalated)
+	}
+	wt := filepath.Join(e.repo, ".worktrees", j.ID)
+	if out := git(t, wt, "status", "--porcelain"); strings.TrimSpace(out) != "" {
+		t.Errorf("worktree left dirty across a state boundary:\n%s", out)
+	}
+	logOut := git(t, wt, "log", "--oneline")
+	if !strings.Contains(logOut, "IMPLEMENTING (incomplete)") {
+		t.Errorf("the failed state's work was not preserved:\n%s", logOut)
+	}
+	if !strings.Contains(e.eventDetails(j.ID), "preserved_incomplete_work") {
+		t.Error("preservation not recorded in the event log")
 	}
 }

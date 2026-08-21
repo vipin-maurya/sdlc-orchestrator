@@ -120,12 +120,12 @@ Terminal states: `COMPLETED`, `CANCELLED`, `FAILED`.
 | CREATED | scheduler picks up job, worktree provisioned | PLANNING |
 | PLANNING | spec.json + plan.json valid | DESIGN_REVIEW |
 | PLANNING | agent failure > `limits.max_agent_retries` | ESCALATED |
-| DESIGN_REVIEW | review.json has zero `blocker` findings | IMPLEMENTING |
-| DESIGN_REVIEW | blockers present, rounds < `limits.max_design_review_rounds` | PLANNING |
-| DESIGN_REVIEW | blockers present, rounds exhausted | ESCALATED |
-| IMPLEMENTING | non-empty diff + implementation.json valid; orchestrator commits | CODE_REVIEW |
-| CODE_REVIEW | zero blockers | BUILDING |
-| CODE_REVIEW | blockers, rounds < `limits.max_code_review_rounds` | FIXING |
+| DESIGN_REVIEW | no finding at or above `policies.design_review_blocks_at`; any lesser findings forwarded to IMPLEMENTING | IMPLEMENTING |
+| DESIGN_REVIEW | blocking findings present, rounds < `limits.max_design_review_rounds` | PLANNING |
+| DESIGN_REVIEW | blocking findings present, rounds exhausted | ESCALATED |
+| IMPLEMENTING | non-empty diff + implementation.json valid + every plan step accounted for; orchestrator commits | CODE_REVIEW |
+| CODE_REVIEW | no finding at or above `policies.code_review_blocks_at` | BUILDING |
+| CODE_REVIEW | blocking findings, rounds < `limits.max_code_review_rounds` | FIXING |
 | CODE_REVIEW | rounds exhausted | ESCALATED |
 | BUILDING | all build commands exit 0 | TESTING |
 | BUILDING | build fails | ANALYZING |
@@ -139,8 +139,8 @@ Terminal states: `COMPLETED`, `CANCELLED`, `FAILED`.
 | ANALYZING | classification `unknown` or fix attempts exhausted | ESCALATED |
 | FIXING | diff passes test-file policy; orchestrator commits | BUILDING |
 | FIXING | diff violates test-file policy | ESCALATED |
-| FINAL_REVIEW | zero blockers | AWAITING_MERGE_APPROVAL |
-| FINAL_REVIEW | blockers, fix attempts remain | FIXING |
+| FINAL_REVIEW | no finding at or above `policies.final_review_blocks_at`; any lesser findings attached to the approval event | AWAITING_MERGE_APPROVAL |
+| FINAL_REVIEW | blocking findings, fix attempts remain | FIXING |
 | FINAL_REVIEW | fix attempts exhausted | ESCALATED |
 | AWAITING_MERGE_APPROVAL | `sdlc approve` | MERGING |
 | AWAITING_MERGE_APPROVAL | `sdlc reject` | FIXING (reason attached) or CANCELLED (`--cancel`) |
@@ -165,8 +165,15 @@ Notes (normative):
 - **ANALYZING never gets to declare "flaky"** — its schema only allows
   `code_bug | test_bug | environment | unknown`.
 - **Approval is computed, not declared:** a review state passes iff its
-  `review.json` contains zero findings with `severity: blocker`. The agent
-  emits findings; the orchestrator derives the verdict.
+  `review.json` contains no finding at or above that gate's configured
+  threshold (`policies.design_review_blocks_at`, `code_review_blocks_at`,
+  `final_review_blocks_at`; severities rank nit < minor < major < blocker).
+  The agent emits findings; the orchestrator derives the verdict — reviewers
+  never see the threshold, so they cannot grade to it.
+- **Passing findings are forwarded, never dropped.** A finding below the
+  threshold still describes a real problem in work nobody will revisit:
+  design-review findings are staged and inlined into the IMPLEMENTING prompt,
+  and final-review findings ride along on the merge-approval event.
 - **AWAITING_* states are durable.** The engine parks them; restart-safe;
   approval arrives via the DB from a separate `sdlc approve` invocation.
 - BLOCKED_ON_QUOTA does **not** consume retry/fix budgets.
@@ -325,20 +332,83 @@ This is what forces Opus to be explicit enough for a Gemini implementer.
 { "schema": "review/1", "reviewed": "spec|diff|final",
   "findings": [ { "id": "F1", "severity": "blocker|major|minor|nit",
                   "file": "optional", "description": "...",
-                  "recommendation": "..." } ],
+                  "recommendation": "...",
+                  "verification": { "...": "attached by the verify pass" } } ],
   "summary": "..." }
 ```
-Verdict = derived: pass ⇔ zero `blocker`.
+Verdict = derived: pass ⇔ no finding at or above the gate's configured
+threshold (§3.2), **after the verify pass (§5.2)**. Severities rank
+nit < minor < major < blocker. `verification` is absent on the raw artifact an
+agent writes; the orchestrator adds it to the `*.verified.json` copy.
+
+**verdict/1** (`.sdlc/verdicts/<finding>.v<n>.json`)
+```json
+{ "schema": "verdict/1", "finding_id": "F1",
+  "verdict": "confirmed|refuted",
+  "evidence": "what was inspected and what it showed",
+  "reasoning": "why that settles it" }
+```
+Both `evidence` and `reasoning` are required and non-empty. A verdict without
+evidence is an opinion, and an opinion is what the verify pass exists to stop
+trusting.
+
+### 5.2 Verify pass (normative)
+
+A review finding severe enough to gate is put to `limits.verify_votes`
+independent agents before it is allowed to stop the pipeline. The pass runs
+inside DESIGN_REVIEW, CODE_REVIEW and FINAL_REVIEW — one implementation, three
+call sites — between loading the artifact and gating on it.
+
+- **Scope.** Only findings at or above the gate's threshold. Findings that
+  cannot change control flow are never verified; a clean review invokes nobody.
+- **Fan-out.** `verify_votes` agents per gating finding, run concurrently, each
+  seeing that one finding plus the same context the reviewer had. Verifiers
+  never see each other's verdicts — that independence is the only thing that
+  makes the vote worth counting.
+- **Stance.** Each verifier is asked to **refute**, and must supply evidence
+  for whichever verdict it reaches. The prompt carries the rule that decides
+  most cases: a claim about third-party library behaviour is not verified until
+  the resolved dependency has been inspected, and must never be confirmed or
+  refuted from memory.
+- **Aggregation.** A finding survives at its stated severity when
+  `confirmed >= limits.verify_min_confirm`. Otherwise it is downgraded to `nit`
+  and excluded from the gate. Findings are **never deleted**: a refuted finding
+  stays in the artifact with its refutations attached, so the record shows what
+  was considered and why it was dismissed.
+- **Inconclusive.** If no verifier produced a valid verdict, the finding keeps
+  gating. Declining to decide is not a refutation.
+- **Persistence.** The verified review is written beside the raw artifact as
+  `<name>.verified.json`, and a `verify_pass` event records
+  `{gating, confirmed, refuted}`. Downstream states read the verified copy.
+- **Immutability.** Verifiers are reviewers: `requireCleanTree` applies, and
+  their invocations count against `limits.max_agent_invocations_per_job`. The
+  whole fan-out is reserved against that budget at once — half a vote is not a
+  vote.
+- **Disabling.** `limits.verify_votes: 0` switches the pass off entirely and
+  gates on the reviewer's word alone.
+
+Rationale: a single reviewer stage cannot distinguish a correct finding from a
+fluent wrong one, and the gate sees a severity rather than an argument. Raising
+`policies.*_blocks_at` above `blocker` without this pass makes a confident false
+positive able to force a rework round over a bug that does not exist.
 
 **implementation/1** (`implementation.json`, `fix.*.json`)
 ```json
 { "schema": "implementation/1", "summary": "...",
   "files_changed": ["..."], "tests_added_or_changed": ["..."],
+  "steps_completed": [ { "id": "S1", "status": "done|skipped",
+                         "note": "required when skipped" } ],
   "test_change_requested": null }
 ```
 `test_change_requested` (string reason) is the *only* legitimate way for a
 FIXING agent to ask for a test modification when the classification was
 `code_bug`; it routes to ESCALATED, never silently applied.
+
+`steps_completed` is optional at the schema level because `fix.*.json` shares
+this schema and a fix has no plan steps to account for. IMPLEMENTING requires
+full coverage in its post-condition instead, where `plan.json` is in hand. A
+`skipped` entry without a `note` is invalid everywhere: a step may be dropped,
+but never silently.
 
 **analysis/1** (`analysis.*.json`)
 ```json
@@ -371,14 +441,31 @@ state handler checks post-conditions itself:
 | State | Post-condition |
 |---|---|
 | PLANNING | `spec.json` + `plan.json` exist and validate |
-| DESIGN_/CODE_/FINAL_REVIEW | round's `review.json` validates; **worktree diff must be empty** (reviewer wrote files ⇒ hard failure) |
-| IMPLEMENTING | `implementation.json` validates; `git status` shows a non-empty diff |
+| DESIGN_/CODE_/FINAL_REVIEW | round's `review.json` validates; **worktree diff must be empty** (reviewer wrote files ⇒ hard failure). Gating findings then go through the verify pass (§5.2) before the gate is evaluated |
+| VERIFYING (per verifier) | `.sdlc/verdicts/<finding>.v<n>.json` validates as `verdict/1`. No retry: the other votes are the redundancy, and retrying would inflate the fan-out silently |
+| IMPLEMENTING | `implementation.json` validates; `steps_completed` accounts for **every** id in `plan.json`; `git status` shows a non-empty diff; no claimed file is unmodified |
 | ANALYZING | `analysis.json` validates; worktree diff empty |
 | FIXING | `fix.json` validates; diff non-empty; diff passes test-file policy |
 
-Post-condition failure ⇒ retry the agent (up to `limits.max_agent_retries`,
-with the failure appended to the prompt), then ESCALATED. Empty stdout with
-satisfied post-conditions is a success (tolerates the known agy stdout bug).
+When the post-condition passes but the backend exited non-zero, the state
+proceeds and the precedence is recorded as a `note` event — some backends exit
+non-zero on their own harness errors after the work is complete and correct.
+
+Post-condition failure ⇒ retry the agent (up to `limits.max_agent_retries`),
+then ESCALATED. A retry re-renders the prompt with a block describing what the
+previous attempt already changed in the worktree, what it left in `.sdlc/`, and
+the specific post-condition that failed — the edits are not reverted between
+attempts, so without that the agent would redo completed work on top of itself.
+Empty stdout with satisfied post-conditions is a success
+(tolerates the known agy stdout bug).
+
+The worktree is **not** reset between attempts, so a retry prompt is the
+freshly rendered template plus a state block naming the failure verbatim, the
+files the previous attempt changed since state entry, and the `.sdlc/` outputs
+it left behind with their parse status. Without it the agent receives a
+first-attempt prompt against a half-edited tree and may re-apply completed
+work on top of itself. Artifacts are decoded tolerantly — a UTF-8 BOM or a
+markdown fence around the JSON is stripped rather than failing the state.
 
 After IMPLEMENTING/FIXING post-conditions pass, the **orchestrator** runs
 `git add -A && git commit` in the worktree with message
@@ -450,6 +537,16 @@ Prompt content rules (normative):
   never "make the build green".
 - Review templates require checklist-driven findings with severities; nothing
   instructs a reviewer to "find problems" unconditionally.
+- The VERIFYING template must instruct the agent to **refute**, must require
+  evidence for either verdict, and must carry the resolved-dependency rule: a
+  claim about third-party library behaviour is not verified until the resolved
+  artifact has been inspected, never from memory. It must also say that an
+  unverifiable claim defaults to `refuted`.
+- The PLANNING template must require the plan to account for its own blast
+  radius: for every production symbol it modifies, the existing tests that
+  assert the current behaviour are named in the step that changes it, with
+  whether each is expected to change. An unanticipated test change stops the
+  job; a planned one is just work.
 
 `prompt_hash` (sha256 of the rendered prompt) is recorded on every event.
 
@@ -468,12 +565,27 @@ clear error. Defaults: CODE_REVIEW vs IMPLEMENTING, DESIGN_REVIEW vs PLANNING.
 - Worktree: `<targets.<t>.worktrees_dir>/<job-id>` (default
   `<repo>/.worktrees/<job-id>`; the orchestrator ensures `.worktrees/` is
   ignored via `.git/info/exclude`).
-- On every state entry the engine records `head_sha`. **Resume reconciliation:**
-  on startup, for each non-terminal job, compare actual worktree HEAD/status
-  to the recorded sha. All agent states are *restartable*: uncommitted work is
-  discarded (`git reset --hard <recorded sha>` + `git clean -fd`) and the
-  state re-runs. BUILDING/TESTING/FLAKE_CHECK re-run idempotently.
+- On every state entry the engine re-reads the branch head from git rather
+  than trusting the recorded `head_sha`, and adopts it if it moved. Every
+  guard that says "the agent changed these files" is only as honest as that
+  sha: a human who commits on the job branch — the normal way to answer an
+  escalation — would otherwise have their commits attributed to the next agent
+  and rolled back by the test-file policy. A resync emits a `note` event.
+- **Resume reconciliation:** on startup, for each non-terminal job, classify
+  the branch against the recorded sha before touching anything.
+  - *Branch ahead of the record* (recorded sha is an ancestor): adopt the
+    commits, log them, and reset only the uncommitted layer.
+  - *Diverged* (neither sha is an ancestor of the other): ESCALATE. History was
+    rewritten under the job and there is no safe automatic answer.
+  - *Equal or behind:* discard uncommitted work (`git reset --hard` +
+    `git clean -fd`) and re-run the state.
+  Only ever the uncommitted layer is discarded. All agent states are
+  *restartable*; BUILDING/TESTING/FLAKE_CHECK re-run idempotently.
   AWAITING_*/BLOCKED_*/holds resume as parked.
+- A state that fails or escalates has its worktree committed first
+  (`[sdlc JOB-n] STATE (incomplete): ...`). An escalated state's output is
+  exactly what the operator has to inspect, and the worktree is never left
+  dirty across a state boundary.
 - MERGING procedure: `git fetch` (if remote) → rebase job branch onto
   `default_branch` → if `merge.verify_after_rebase: build`, re-run the build
   command → `git checkout <default>` (in main repo) → `git merge --no-ff` →
@@ -549,7 +661,14 @@ sdlc status  [job]            table of jobs / detail incl. counters, waits
 sdlc approve <job> [--note]   consume current AWAITING_* gate
 sdlc reject  <job> --reason "..." [--cancel]
 sdlc cancel  <job>
-sdlc resume  <job> [--to STATE]   clear ESCALATED/TIMED_OUT/BLOCKED hold
+sdlc resume  <job> [--to STATE] [--note "..."]
+                              clear ESCALATED/TIMED_OUT/BLOCKED hold. --to
+                              must name a runnable state. --note is handed to
+                              the agent in the resumed state as a human
+                              instruction, scoped to that one attempt — the
+                              channel for answering an escalation ("yes, those
+                              fixtures are stale, update them") without
+                              hand-editing the repository.
 sdlc events  <job> [--json]   event log
 sdlc logs    <job> [--last]   print artifact/log paths (and tail last log)
 sdlc validate                 config + environment doctor: binaries exist &
@@ -559,6 +678,11 @@ sdlc validate                 config + environment doctor: binaries exist &
                               any hard failure.
 sdlc version
 ```
+
+Every command accepts its flags before, after, or interleaved with its
+positional argument, and rejects unrecognised trailing arguments rather than
+ignoring them. (Go's `flag` package stops at the first non-flag token; taking
+that default silently discarded `--to` in `sdlc resume JOB-1 --to BUILDING`.)
 
 `submit`, `approve`, `reject`, `cancel`, `resume` only write the DB; the
 running engine picks changes up on its next tick (`orchestrator.poll_interval`).
@@ -599,6 +723,8 @@ limits:
   max_agent_invocations_per_job: 40   # budget guardrail; exceed ⇒ ESCALATED
   log_excerpt_lines: 200        # failure-log tail fed to ANALYZING
   log_error_patterns: ["(?i)error", "(?i)exception", "FAILED"]
+  verify_votes: 3               # independent verifiers per gating finding (§5.2); 0 disables
+  verify_min_confirm: 2         # confirmations needed for the finding to survive
 
 resources:
   gradle_slots: 1               # concurrent gradle invocations, all jobs
@@ -680,9 +806,17 @@ states:                          # every agent state must appear here
     timeout: 20m
     disallowed_tools: [Edit, NotebookEdit, Bash]
     must_differ_backend_from: IMPLEMENTING
+  VERIFYING:                    # not a pipeline state — the verify pass (§5.2)
+    agent: opus                 # at or above the reviewers' tier, never below
+    prompt: ""
+    timeout: 15m
+    disallowed_tools: [Edit, NotebookEdit]   # Bash kept: verifiers read jars
 
 policies:
   protected_branches: [main, master]
+  design_review_blocks_at: major        # blocker | major | minor | nit — lowest severity
+  code_review_blocks_at: blocker        # that stops the pipeline at each review gate.
+  final_review_blocks_at: blocker       # Default blocker; lesser findings are forwarded, not dropped.
   protect_tests_on_code_bug_fix: true   # FIXING diff may not touch test files when classification=code_bug
   test_file_globs:
     - "**/src/test/**"

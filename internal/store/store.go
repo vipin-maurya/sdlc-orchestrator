@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -49,6 +50,11 @@ type Counters struct {
 	// HumanRejectReason carries the reason from a merge-gate rejection into
 	// the next FIXING prompt.
 	HumanRejectReason string `json:"human_reject_reason,omitempty"`
+	// LastDesignReview names the design-review artifact whose findings passed
+	// the gate but still need forwarding to IMPLEMENTING. Empty when the
+	// review was clean. DesignReviewRounds cannot serve this purpose: it only
+	// increments on rejection, so it is 0 for a review that passed.
+	LastDesignReview string `json:"last_design_review,omitempty"`
 }
 
 type Job struct {
@@ -93,11 +99,18 @@ type Event struct {
 }
 
 type Approval struct {
-	ID        int64
-	JobID     string
-	Gate      string // merge | release
-	Decision  string // approve | reject
-	Reason    string
+	ID       int64
+	JobID    string
+	Gate     string // merge | release | resume | cancel
+	Decision string // approve | reject | resume | cancel
+	// Reason is gate-specific: the rejection reason for a merge/release gate,
+	// the target state for a resume.
+	Reason string
+	// Note is free text the operator addresses to the *agent* that runs next,
+	// as opposed to Reason which the orchestrator interprets. It is the only
+	// channel by which a human can answer an escalation ("yes, those fixtures
+	// are stale — update them") without hand-editing the repository.
+	Note      string
 	Cancel    bool
 	Consumed  bool
 	CreatedAt time.Time
@@ -150,6 +163,7 @@ CREATE TABLE IF NOT EXISTS approvals (
   gate TEXT NOT NULL,
   decision TEXT NOT NULL,
   reason TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
   cancel INTEGER NOT NULL DEFAULT 0,
   consumed INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
@@ -176,6 +190,17 @@ func Open(path string, busyTimeout time.Duration) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	// Columns added after the first release. CREATE TABLE IF NOT EXISTS does
+	// nothing to a table that already exists, so each new column needs its own
+	// idempotent ALTER; "duplicate column name" means it is already there.
+	for _, stmt := range []string{
+		`ALTER TABLE approvals ADD COLUMN note TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			db.Close()
+			return nil, fmt.Errorf("migrate: %s: %w", stmt, err)
+		}
 	}
 	return &Store{db: db}, nil
 }
@@ -344,9 +369,9 @@ func (s *Store) CountEvents(jobID string) (int, error) {
 
 func (s *Store) AddApproval(a *Approval) error {
 	a.CreatedAt = time.Now()
-	res, err := s.db.Exec(`INSERT INTO approvals(job_id,gate,decision,reason,cancel,consumed,created_at)
-		VALUES (?,?,?,?,?,0,?)`,
-		a.JobID, a.Gate, a.Decision, a.Reason, boolInt(a.Cancel), fmtTime(a.CreatedAt))
+	res, err := s.db.Exec(`INSERT INTO approvals(job_id,gate,decision,reason,note,cancel,consumed,created_at)
+		VALUES (?,?,?,?,?,?,0,?)`,
+		a.JobID, a.Gate, a.Decision, a.Reason, a.Note, boolInt(a.Cancel), fmtTime(a.CreatedAt))
 	if err != nil {
 		return err
 	}
@@ -356,12 +381,12 @@ func (s *Store) AddApproval(a *Approval) error {
 
 // PendingApproval returns the oldest unconsumed approval for a job+gate.
 func (s *Store) PendingApproval(jobID, gate string) (*Approval, error) {
-	row := s.db.QueryRow(`SELECT id,job_id,gate,decision,reason,cancel,consumed,created_at
+	row := s.db.QueryRow(`SELECT id,job_id,gate,decision,reason,note,cancel,consumed,created_at
 		FROM approvals WHERE job_id=? AND gate=? AND consumed=0 ORDER BY id LIMIT 1`, jobID, gate)
 	var a Approval
 	var cancel, consumed int
 	var created string
-	err := row.Scan(&a.ID, &a.JobID, &a.Gate, &a.Decision, &a.Reason, &cancel, &consumed, &created)
+	err := row.Scan(&a.ID, &a.JobID, &a.Gate, &a.Decision, &a.Reason, &a.Note, &cancel, &consumed, &created)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
