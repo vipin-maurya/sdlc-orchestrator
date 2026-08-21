@@ -83,3 +83,61 @@ func TestParseArgsRejectsUnknownFlags(t *testing.T) {
 type io_Discard struct{}
 
 func (io_Discard) Write(p []byte) (int, error) { return len(p), nil }
+
+// `sdlc review` is the first command whose positional argument is optional:
+// with an id it decides one job, without one it walks everything waiting.
+// parseArgsRange is what parseArgs became so that could work, so the bound it
+// applies at each end is what needs holding — the four tests above prove the
+// exact-count case still behaves, and this one proves the range case does.
+func TestParseArgsRangeAcceptsZeroOrOne(t *testing.T) {
+	const usage = "sdlc review [JOB-ID] [--diff] [--no-prompt]"
+	cases := []struct {
+		name    string
+		args    []string
+		wantPos []string
+		wantErr string
+	}{
+		{"no positional at all", []string{}, nil, ""},
+		{"flags only", []string{"--diff"}, nil, ""},
+		{"one positional", []string{"JOB-1"}, []string{"JOB-1"}, ""},
+		{"positional then flag", []string{"JOB-1", "--diff"}, []string{"JOB-1"}, ""},
+		{"flag then positional", []string{"--diff", "JOB-1"}, []string{"JOB-1"}, ""},
+		{"two positionals", []string{"JOB-1", "JOB-2"}, nil, "JOB-2"},
+		{"unknown flag", []string{"JOB-1", "--nope"}, nil, "nope"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := flag.NewFlagSet("review", flag.ContinueOnError)
+			fs.SetOutput(io_Discard{})
+			diff := fs.Bool("diff", false, "")
+			pos, err := parseArgsRange(fs, tc.args, 0, 1, usage)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("parseArgsRange(%v) = %v, want an error naming %q", tc.args, pos, tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error %v does not name %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseArgsRange(%v): %v", tc.args, err)
+			}
+			if strings.Join(pos, ",") != strings.Join(tc.wantPos, ",") {
+				t.Errorf("positional = %v, want %v", pos, tc.wantPos)
+			}
+			if wantDiff := contains(tc.args, "--diff"); *diff != wantDiff {
+				t.Errorf("--diff = %v, want %v", *diff, wantDiff)
+			}
+		})
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
+}

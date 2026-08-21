@@ -123,3 +123,59 @@ func TestDurationParsing(t *testing.T) {
 		t.Error("invalid duration accepted")
 	}
 }
+
+// human_gates is a hand-written list in a YAML file, so "Spec", "SPEC" and a
+// stray space around it all have to name the same checkpoint. A config that
+// quietly means "no gate" because somebody capitalised a word is a config that
+// stops nothing, and the operator only finds out when the job merges itself.
+func TestHumanGateMatching(t *testing.T) {
+	cases := []struct {
+		name  string
+		gates []string
+		probe string
+		want  bool
+	}{
+		{"exact match", []string{"spec"}, "spec", true},
+		{"upper case in the config", []string{"SPEC"}, "spec", true},
+		{"mixed case in the config", []string{"Code"}, "code", true},
+		{"whitespace around the entry", []string{"  spec  "}, "spec", true},
+		{"one of several entries", []string{"merge", "code", "release"}, "code", true},
+		{"a different gate is listed", []string{"code"}, "spec", false},
+		{"nothing is listed", nil, "spec", false},
+		{"empty slice is not a wildcard", []string{}, "code", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Policies{HumanGates: tc.gates}
+			if got := p.HumanGate(tc.probe); got != tc.want {
+				t.Errorf("Policies{HumanGates: %q}.HumanGate(%q) = %v, want %v",
+					tc.gates, tc.probe, got, tc.want)
+			}
+		})
+	}
+}
+
+// The two gates the pipeline can reach must both come back on, and neither
+// must switch the other on: `human_gates: [spec]` stopping a job before build
+// as well would be a config that does more than it says.
+func TestHumanGatesAreIndependent(t *testing.T) {
+	cfg, err := load(t, minimalTarget+"policies:\n  human_gates: [spec]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Policies.HumanGate("spec") {
+		t.Error("human_gates: [spec] did not enable the spec gate")
+	}
+	if cfg.Policies.HumanGate("code") {
+		t.Error("human_gates: [spec] enabled the code gate as well")
+	}
+}
+
+// An unknown gate name is a typo, and a typo that loads is a checkpoint the
+// operator believes in and never gets.
+func TestUnknownHumanGateRejected(t *testing.T) {
+	_, err := load(t, minimalTarget+"policies:\n  human_gates: [speck]\n")
+	if err == nil || !strings.Contains(err.Error(), "unknown gate") {
+		t.Errorf("human_gates: [speck] was accepted: %v", err)
+	}
+}

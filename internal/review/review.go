@@ -130,14 +130,18 @@ func Write(ctx context.Context, o Options) (*Doc, string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, "", err
 	}
+	// The patch goes down first so the document can name it: a path is only
+	// worth printing once the file behind it is there to open.
+	if doc.Diff != "" {
+		diffPath := DiffPath(o.DataDir, o.Job.ID, doc.Gate)
+		if err := os.WriteFile(diffPath, []byte(doc.Diff), 0o644); err != nil {
+			return nil, "", err
+		}
+		doc.Body += fmt.Sprintf("\nFull patch: `%s`\n", diffPath)
+	}
 	docPath := DocPath(o.DataDir, o.Job.ID, doc.Gate)
 	if err := os.WriteFile(docPath, []byte(doc.Body), 0o644); err != nil {
 		return nil, "", err
-	}
-	if doc.Diff != "" {
-		if err := os.WriteFile(DiffPath(o.DataDir, o.Job.ID, doc.Gate), []byte(doc.Diff), 0o644); err != nil {
-			return nil, "", err
-		}
 	}
 	return doc, docPath, nil
 }
@@ -341,10 +345,13 @@ func renderDiff(ctx context.Context, b *strings.Builder, d *Doc, o Options) {
 	patch, err := repo.DiffPatchSince(dctx, o.Job.WorktreePath, base)
 	if err == nil {
 		d.Diff = patch
-		fmt.Fprintf(b, "Full patch: `%s`\n\n", DiffPath(o.DataDir, o.Job.ID, d.Gate))
 		if o.FullDiff {
 			fmt.Fprintf(b, "```diff\n%s\n```\n\n", strings.TrimRight(patch, "\n"))
 		} else {
+			// No path to the patch file here: Render does not write it, and only
+			// Write knows it is on disk. Naming it from here would point a reader
+			// at a file that exists only when the engine happened to park this
+			// job — the git command works either way.
 			fmt.Fprintf(b, "_Re-run with `--diff` to read it inline, or `git -C %s diff %s`._\n\n",
 				o.Job.WorktreePath, short(base))
 		}

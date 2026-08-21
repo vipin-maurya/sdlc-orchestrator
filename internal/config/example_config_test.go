@@ -22,4 +22,16 @@ func TestExampleConfigDecodes(t *testing.T) {
 	if _, ok := cfg.Backends["claude"]; !ok {
 		t.Error("claude backend missing from the example config")
 	}
+	// The console announces every open gate on this interval. A file that
+	// omits the key leaves the operator copying a config whose reminders are
+	// off, which is exactly the silence the key exists to end.
+	if cfg.Orchestrator.GateReminderInterval.D() == 0 {
+		t.Error("gate_reminder_interval did not decode from the example config")
+	}
+	// human_gates stays commented out: copying the example must not add a
+	// place an unattended run stops.
+	if len(cfg.Policies.HumanGates) != 0 {
+		t.Errorf("example config enables human_gates %q; it must ship with none",
+			cfg.Policies.HumanGates)
+	}
 }

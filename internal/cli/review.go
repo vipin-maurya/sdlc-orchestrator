@@ -324,7 +324,18 @@ func answerKey(ans string) string {
 // exits without touching the database.
 func interactive() bool {
 	fi, err := os.Stdin.Stat()
-	return err == nil && fi.Mode()&os.ModeCharDevice != 0
+	if err != nil || fi.Mode()&os.ModeCharDevice == 0 {
+		return false
+	}
+	// /dev/null is a character device too, and it is exactly what a service
+	// manager, a cron entry or a `< /dev/null` invocation hands a process with
+	// no console. Reading the mode bits alone calls that a terminal, so the
+	// fan-out would print one document, read EOF, treat it as "quit" and stop
+	// — silently reviewing one job out of five.
+	if null, err := os.Stat(os.DevNull); err == nil && os.SameFile(fi, null) {
+		return false
+	}
+	return true
 }
 
 // fileExists is how the CLI decides whether to name a path. Printing the path

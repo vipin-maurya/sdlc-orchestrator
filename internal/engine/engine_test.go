@@ -6,6 +6,7 @@ package engine
 // real models.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -71,6 +73,19 @@ func runFakeAgent(promptFile string) int {
 	case strings.Contains(prompt, "verification agent"):
 		return runFakeVerifier(prompt)
 	case strings.Contains(prompt, "planning agent"):
+		// FAKE_PLAN_REQUIRE_CONTEXT: a re-plan driven by a human rejection must
+		// be handed the spec and plan it is revising. Without them the planner
+		// writes a new spec from scratch instead of answering the objection,
+		// and the staging condition that guarantees this is easy to narrow by
+		// accident — it keys off a counter a human "no" never increments.
+		if os.Getenv("FAKE_PLAN_REQUIRE_CONTEXT") == "1" && strings.Contains(prompt, "A human rejected") {
+			for _, n := range []string{"spec.json", "plan.json"} {
+				if _, err := os.Stat(filepath.Join(".sdlc", "context", n)); err != nil {
+					fmt.Fprintf(os.Stderr, "fakeagent: context/%s not staged for the re-plan: %v\n", n, err)
+					return 1
+				}
+			}
+		}
 		writeOut("spec.json", `{"schema":"spec/1","issue_summary":"demo","approach":"edit app.txt",
 			"affected_files":["src/app.txt"],"acceptance_criteria":["app.txt updated"],
 			"error_paths":[],"out_of_scope":[],"compatibility_concerns":[]}`)
@@ -379,6 +394,43 @@ func (e *env) runEngine() {
 	if err := eng.Run(ctx, true); err != nil {
 		e.t.Fatalf("engine: %v", err)
 	}
+}
+
+// syncBuf is a log destination the race detector tolerates. The engine logs
+// from tick *and* from every step goroutine, so a bare bytes.Buffer behind
+// log.Logger is not enough: log.Logger serialises its own writes, but the test
+// then reads the buffer from a third goroutine while a step is still finishing.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// runEngineLogged is runEngine with the console captured. The gate
+// announcements are the console, so a test that asserts on them has to read
+// what an operator would have seen rather than what the database ended up
+// holding.
+func (e *env) runEngineLogged() string {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	buf := &syncBuf{}
+	eng := New(e.cfg, e.st, log.New(buf, "", 0))
+	if err := eng.Run(ctx, true); err != nil {
+		e.t.Fatalf("engine: %v", err)
+	}
+	return buf.String()
 }
 
 func (e *env) jobState(id string) *store.Job {
