@@ -78,10 +78,12 @@ observing the failure.
    is only ever reached at EOF, where `closeHunk` catches it first. Four smaller
    mutants (T4-T8) likewise survive.
 
-**Also open:** `jobs.Submit` has no callers. `cmdSubmit` carries its own copy and
-the two already disagree on the empty-target exit code (2 vs 1) and the
-missing-title message, so cutting the CLI over is a behaviour change, not a
-refactor, and wants its own tests.
+*Closed since this was written:* `jobs.Submit` had no callers — `cmdSubmit`
+carried its own copy and the two had already drifted on the empty-target exit
+code and the missing-title message. The CLI now calls it, with both pinned by
+tests (`a0c54ff`). The four gate asides that rendered with visible backticks
+inside italics are fixed too: `Span` gained `Children`, so emphasis wraps inline
+code and the markdown bytes are unchanged (`ec392a9`).
 
 ---
 
