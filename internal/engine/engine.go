@@ -437,6 +437,9 @@ func (e *Engine) transition(j *store.Job, next, note string) {
 	j.State = next
 	j.StateEnteredAt = time.Now()
 	j.Counters.AgentRetries = 0
+	// The next state measures its work from wherever the branch is when it
+	// starts — including any commits a human made while the job was held.
+	j.Counters.StateEntryHead = ""
 	if err := e.st.UpdateJob(j); err != nil {
 		e.logger.Printf("%s: persist transition %s->%s: %v", j.ID, prev, next, err)
 	}

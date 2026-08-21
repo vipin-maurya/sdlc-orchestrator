@@ -48,6 +48,19 @@ Failure log excerpt:
 4. Do NOT run full builds or suites; the orchestrator re-runs them after you finish.
 5. Stay minimal: change only what the fix requires.
 
+# Report each part of the fix as you finish it
+
+When a fix takes more than one distinct edit, append a line to `.sdlc/progress.jsonl` as each one
+lands:
+
+```
+{"step": "root-cause", "summary": "restored TXN_ID_EXPLICIT precedence in SmsExpenseParser"}
+```
+
+One compact JSON object per line. The orchestrator watches the file and commits your work as it
+arrives, so a fix that is later rejected or interrupted does not take a completed part of itself
+with it. `step` is any short label you choose; there are no plan step ids here.
+
 # Output (mandatory)
 
 After your changes, write EXACTLY this file, containing only valid JSON:

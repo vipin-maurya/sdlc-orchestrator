@@ -15,9 +15,11 @@ import (
 // Dir returns the job's root data directory: <data_dir>/jobs/<job-id>.
 func Dir(dataDir, jobID string) string { return filepath.Join(dataDir, "jobs", jobID) }
 
-func ArtifactsDir(dataDir, jobID string) string { return filepath.Join(Dir(dataDir, jobID), "artifacts") }
-func LogsDir(dataDir, jobID string) string      { return filepath.Join(Dir(dataDir, jobID), "logs") }
-func PromptsDir(dataDir, jobID string) string   { return filepath.Join(Dir(dataDir, jobID), "prompts") }
+func ArtifactsDir(dataDir, jobID string) string {
+	return filepath.Join(Dir(dataDir, jobID), "artifacts")
+}
+func LogsDir(dataDir, jobID string) string    { return filepath.Join(Dir(dataDir, jobID), "logs") }
+func PromptsDir(dataDir, jobID string) string { return filepath.Join(Dir(dataDir, jobID), "prompts") }
 
 // EnsureLayout creates the job directory tree and writes issue.md.
 func EnsureLayout(dataDir, jobID, issueTitle, issueBody string) error {

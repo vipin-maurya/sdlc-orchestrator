@@ -4,6 +4,7 @@
 package execx
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -29,6 +31,12 @@ type Cmd struct {
 	// interleaving is what you want. On a non-zero exit stderr is appended
 	// anyway, so error messages keep their detail. Ignored by Run.
 	StderrSeparate bool
+	// OnLine, when set, is called with each complete output line as the
+	// command produces it, before the command exits. It is what makes a long
+	// agent run observable: without it a 13-minute state is a blank terminal
+	// and a hung one looks identical. Called from the process's reader
+	// goroutine, so it must not block for long.
+	OnLine func(string)
 }
 
 type Result struct {
@@ -59,15 +67,15 @@ func Run(ctx context.Context, c Cmd) (Result, error) {
 
 	var sink io.Writer = io.Discard
 	if c.LogPath != "" {
-		if err := os.MkdirAll(filepath.Dir(c.LogPath), 0o755); err != nil {
-			return Result{}, err
-		}
-		f, err := os.Create(c.LogPath)
+		f, err := createLog(c.LogPath)
 		if err != nil {
 			return Result{}, err
 		}
 		defer f.Close()
 		sink = f
+	}
+	if c.OnLine != nil {
+		sink = io.MultiWriter(sink, newLineWriter(c.OnLine))
 	}
 	cmd.Stdout = sink
 	cmd.Stderr = sink
@@ -94,6 +102,11 @@ func Run(ctx context.Context, c Cmd) (Result, error) {
 // RunCapture is Run but additionally returns combined output as a string
 // (bounded to maxBytes; 0 = unbounded). Used for small helper commands
 // (git, adb) — big builds should stream to a log file instead.
+//
+// When LogPath is set the log is written *as the command runs*, not after it
+// exits. The distinction matters for agents: an unattended run's only window
+// into a state that has been going for ten minutes is `sdlc logs --last`, and
+// a log file that materialises only on exit is no window at all.
 func RunCapture(ctx context.Context, c Cmd, maxBytes int64) (Result, string, error) {
 	if len(c.Argv) == 0 {
 		return Result{}, "", fmt.Errorf("empty argv")
@@ -115,10 +128,41 @@ func RunCapture(ctx context.Context, c Cmd, maxBytes int64) (Result, string, err
 	if maxBytes > 0 {
 		w = &limitedWriter{w: &sb, n: maxBytes}
 	}
+	// The captured string is bounded; the log file is not. A truncated capture
+	// must not truncate the log an operator reads afterwards, so the two are
+	// separate sinks rather than one written from the other.
+	var extra []io.Writer
+	if c.LogPath != "" {
+		f, err := createLog(c.LogPath)
+		if err != nil {
+			return Result{}, "", err
+		}
+		defer f.Close()
+		extra = append(extra, f)
+	}
+	if c.OnLine != nil {
+		extra = append(extra, newLineWriter(c.OnLine))
+	}
+	// With StderrSeparate the two streams are distinct writers, so os/exec
+	// pumps them from two goroutines — and they share these sinks. The mutex
+	// is what keeps the line splitter's buffer and the log file from being
+	// written concurrently.
+	var side io.Writer
+	if len(extra) > 0 {
+		side = &syncWriter{w: io.MultiWriter(extra...)}
+		w = io.MultiWriter(w, side)
+	}
 	cmd.Stdout = w
 	var errb strings.Builder
 	if c.StderrSeparate {
-		cmd.Stderr = &limitedWriter{w: &errb, n: 1 << 16}
+		// Diagnostics stay out of the parsed string but still reach the log:
+		// a backend that fails with everything on stderr must not produce an
+		// empty log file.
+		var ew io.Writer = &limitedWriter{w: &errb, n: 1 << 16}
+		if side != nil {
+			ew = io.MultiWriter(ew, side)
+		}
+		cmd.Stderr = ew
 	} else {
 		cmd.Stderr = w
 	}
@@ -147,6 +191,65 @@ func RunCapture(ctx context.Context, c Cmd, maxBytes int64) (Result, string, err
 		return res, withErr(), err
 	}
 	return res, out, nil
+}
+
+func createLog(path string) (*os.File, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
+	return os.Create(path)
+}
+
+// lineWriter splits a byte stream into complete lines and hands each to a
+// callback. Backends emit their progress a line at a time (one JSON object per
+// event for a streaming CLI, plain prose otherwise), and a writer that fired
+// per Write call would split mid-line on any buffer boundary.
+//
+// An over-long line with no newline in it — a base64 blob, a minified file
+// echoed back — is flushed at maxLine rather than buffered without limit.
+type lineWriter struct {
+	fn  func(string)
+	buf []byte
+}
+
+const maxLine = 1 << 16
+
+func newLineWriter(fn func(string)) *lineWriter { return &lineWriter{fn: fn} }
+
+func (l *lineWriter) Write(p []byte) (int, error) {
+	l.buf = append(l.buf, p...)
+	for {
+		i := bytes.IndexByte(l.buf, '\n')
+		if i < 0 {
+			if len(l.buf) > maxLine {
+				l.emit(l.buf[:maxLine])
+				l.buf = l.buf[maxLine:]
+				continue
+			}
+			break
+		}
+		l.emit(l.buf[:i])
+		l.buf = l.buf[i+1:]
+	}
+	return len(p), nil
+}
+
+func (l *lineWriter) emit(b []byte) {
+	if s := strings.TrimRight(string(b), "\r"); strings.TrimSpace(s) != "" {
+		l.fn(s)
+	}
+}
+
+// syncWriter serialises writes to a sink shared by two pump goroutines.
+type syncWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (s *syncWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.w.Write(p)
 }
 
 type limitedWriter struct {

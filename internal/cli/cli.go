@@ -43,7 +43,8 @@ Commands:
                                      clear an ESCALATED/TIMED_OUT/quota hold;
                                      --note instructs the next agent directly
   events    <JOB-ID>                 event log
-  logs      <JOB-ID> [--last]        artifact & log paths (tail last log)
+  logs      <JOB-ID> [--last]        artifact & log paths; --last tails the most
+                                     recent log, including a state still running
   validate  [--smoke]                config + environment doctor
   version
 `
@@ -493,7 +494,10 @@ func cmdEvents(cfg *config.Config, args []string) int {
 
 func cmdLogs(cfg *config.Config, args []string) int {
 	fs := flag.NewFlagSet("logs", flag.ContinueOnError)
-	last := fs.Bool("last", false, "print the tail of the most recent log")
+	// Agent logs are written as the agent produces output, so the most recent
+	// log belongs to the state currently running — this is the way to see what
+	// an in-flight state is doing, not just what a finished one did.
+	last := fs.Bool("last", false, "print the tail of the most recent log (a running state included)")
 	pos, err := parseArgs(fs, args, 1, "sdlc logs <JOB-ID> [--last]")
 	if err != nil {
 		return argFail(err)

@@ -185,6 +185,14 @@ Independent counters per job, persisted (not one shared `retry_count`):
 `flake_retries`, `release_retries`, and per-state `agent_retries`
 (reset on state change). Budgets are configured under `limits.*`.
 
+The same record carries `base_sha` (the worktree head at job creation, what
+every review diffs against) and `state_entry_head` (the branch head when the
+current state began — the baseline for its diff, its post-conditions, and the
+test-file guard). `state_entry_head` is cleared on every transition and
+captured afresh from git on state entry, so commits a human made on the job
+branch while it was held belong to the baseline rather than to the agent
+(§6.1, §13.1).
+
 ### 3.4 UI testing & devices
 
 If `targets.<t>.ui_test.enabled: true`, TESTING additionally runs the UI test
@@ -300,6 +308,12 @@ Agents read inputs and write outputs through `.sdlc/` inside their worktree
   access to see the change).
 - The agent writes its output artifact(s) to `.sdlc/<name>.json`; the
   orchestrator harvests them into the artifact store after validation.
+- In IMPLEMENTING and FIXING the agent also appends one JSON object per line to
+  `.sdlc/progress.jsonl` as it finishes each unit of work
+  (`{"step":"S1","summary":"..."}`). The orchestrator watches the file and
+  commits the worktree as each line arrives (§6.1), so the unit of loss is one
+  step rather than the whole state. The file is advisory: a backend that never
+  writes it is not failed for it.
 - `.sdlc/` is added to the target repo's `.git/info/exclude`, so it never
   appears in status, diffs, or commits.
 
@@ -471,6 +485,42 @@ After IMPLEMENTING/FIXING post-conditions pass, the **orchestrator** runs
 `git add -A && git commit` in the worktree with message
 `[sdlc <job>] <state>: <summary from artifact>`. Agents are instructed not to
 run git; any commits they do make are tolerated (HEAD movement is recorded).
+
+**Checkpoints.** During IMPLEMENTING and FIXING the orchestrator also commits
+each unit of work the agent reports in `.sdlc/progress.jsonl` (§5.0), as
+`[sdlc <job>] <state> checkpoint <step>: <summary>`. One commit per state makes
+a long implementation all-or-nothing — a 13-minute, 22-file run discarded whole
+over a malformed output file — and leaves finished work uncommitted for as long
+as the state runs, one crash-resume away from deletion. The closing
+`<state>: <summary>` commit then covers whatever the checkpoints did not, and
+is a no-op when they covered everything. A state that escalates still has its
+remaining uncommitted work preserved as `<state> (incomplete)` before the job
+parks.
+
+Because checkpoints survive a restart, a re-entered state can begin against
+part of its own work. Its baseline (`counters.state_entry_head`) is therefore
+captured once when the state is entered and persisted, never re-read per run —
+re-reading it would fold the state's own commits into its own baseline — and
+the prompt gains the same worktree-state block a retry gets, saying what is
+already on the branch and to continue rather than redo it.
+
+**Observability.** An agent state is otherwise silent for its whole duration,
+which makes a working state and a hung one indistinguishable. Three mechanisms
+apply, in order of how much the backend must cooperate:
+
+1. The agent's log is written **as output arrives**, not after the process
+   exits, so `sdlc logs <job> --last` tails a state that is still running.
+2. A heartbeat event and console line every `orchestrator.heartbeat_interval`
+   naming the state, elapsed time, action count, and last action. This is the
+   only signal for a backend that emits a single JSON envelope at the end.
+3. When the backend streams its actions (`backends.claude.stream_json`, or any
+   backend that prints progressively), each line is condensed to one
+   human-readable action — `Edit app/src/Parser.kt` — echoed to the console
+   when `orchestrator.stream_output` is set and recorded as a `progress` event
+   at most every 15s.
+
+`sdlc status <job>` prints the most recent `progress` event, so the current
+state's last known action and its age are visible without reading logs.
 
 ### 6.2 Backend adapters
 
@@ -705,6 +755,8 @@ orchestrator:
   poll_interval: 3s             # engine tick for DB-driven changes
   job_id_prefix: JOB            # job ids look like JOB-12
   lock_file: ${data_dir}/engine.lock   # single-engine enforcement
+  stream_output: true           # echo each agent action to the console (§6.1)
+  heartbeat_interval: 60s       # "still running" line + event; 0 disables
 
 database:
   path: ${data_dir}/sdlc.db
@@ -750,6 +802,7 @@ backends:
     quota_backoff: 30m
     expected_version: ""        # non-empty ⇒ sdlc validate warns on mismatch
     extra_args: []
+    stream_json: false          # --output-format stream-json --verbose (§6.1)
   agy:
     binary: agy
     default_timeout: 30m

@@ -110,6 +110,19 @@ sdlc events JOB-1           # agent, model, tokens, exit codes per state
 sdlc logs JOB-1 --last      # artifact/log paths + tail of the latest log
 ```
 
+A state that invokes an agent can run for ten or twenty minutes. It is not
+silent while it does: the engine prints a heartbeat naming the state, how long
+it has been going, and the last action it saw (`orchestrator.heartbeat_interval`),
+and `sdlc status JOB-1` shows the same as a `running:` line. `sdlc logs
+JOB-1 --last` tails the log of a state that is **still running** — agent output
+is written to the log as it arrives.
+
+For a running commentary rather than a heartbeat, the backend has to stream its
+actions: set `backends.claude.stream_json: true` (it adds `--output-format
+stream-json --verbose` to the invocation) and each tool call is echoed as one
+line. Turn the console echo off with `orchestrator.stream_output: false` for a
+headless run; the events and the heartbeat stay either way.
+
 The soak is boring when: the job reaches `AWAITING_MERGE_APPROVAL` without
 escalating, `events` shows the states running on the agents you configured, and
 the release step at the end was a dry run (§4). Ctrl-C at any point — the engine
@@ -242,6 +255,14 @@ with a reason attached, and every one of them is cleared by hand:
 `BLOCKED_ON_QUOTA` is deliberately not a failure: a rate-limited run suspends
 the job instead of burning a retry budget. Start with `sdlc status JOB-1` for
 the reason and the pending action, then `sdlc events JOB-1` for the full trail.
+
+Whatever the stopped state had done is on the branch, not lost in a dirty
+worktree: IMPLEMENTING and FIXING commit each step the agent reports finishing
+(`... checkpoint S3: ...`), and a state that escalates has its remainder
+committed as `... (incomplete)` before the job parks. So `git log` in the job's
+worktree is the record of how far it got, and you can commit a fix on the branch
+yourself — the orchestrator adopts commits it did not make rather than resetting
+over them.
 
 autoship's halt latch is the equivalent idea one layer down, and the two are
 wired together: with `ship.auto_resume_halt: true`, a release retry runs

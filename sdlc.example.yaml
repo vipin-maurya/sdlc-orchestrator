@@ -9,6 +9,16 @@ orchestrator:
   poll_interval: 3s             # engine tick for CLI-driven changes
   job_id_prefix: JOB            # job ids look like JOB-12
   # lock_file: <data_dir>/engine.lock
+  # A state that invokes an agent is opaque for as long as the agent takes —
+  # PLANNING routinely runs twelve minutes. These two make it legible: each
+  # action the agent takes is echoed as it happens (when the backend streams;
+  # see backends.claude.stream_json), and a heartbeat says the state is still
+  # alive even when the backend prints nothing until it exits. Progress is
+  # recorded as job events either way, so `sdlc status` shows the current
+  # state's last action and `sdlc logs JOB --last` tails a log that is still
+  # being written.
+  stream_output: true           # echo agent actions to the engine console
+  heartbeat_interval: 60s       # 0 disables the "still running" line
 
 # database:
 #   path: <data_dir>/sdlc.db
@@ -60,6 +70,12 @@ backends:
     permission_mode: bypassPermissions   # safe: agents only run inside job worktrees
     quota_backoff: 30m            # BLOCKED_ON_QUOTA suspension on rate limits
     # expected_version: "2.1.0"   # non-empty => sdlc validate warns on drift
+    # Ask the CLI for --output-format stream-json (plus --verbose, which that
+    # format requires) so each tool call is visible while the state runs
+    # instead of nothing until it exits. Off by default because it changes the
+    # invocation; turn it on once you have confirmed your claude build accepts
+    # the combination.
+    stream_json: false
   agy:
     binary: C:\Users\vm899\AppData\Local\agy\bin\agy.exe
     default_timeout: 30m

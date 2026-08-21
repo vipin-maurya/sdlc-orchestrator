@@ -82,6 +82,15 @@ type Orchestrator struct {
 	PollInterval    Duration `yaml:"poll_interval"`
 	JobIDPrefix     string   `yaml:"job_id_prefix"`
 	LockFile        string   `yaml:"lock_file"`
+	// StreamOutput echoes each agent action to the engine's console as it
+	// happens. Turn it off for a headless run whose stdout is a log file
+	// nobody reads; the heartbeat and the progress events stay either way.
+	StreamOutput bool `yaml:"stream_output"`
+	// HeartbeatInterval is how often a state that is still running says so.
+	// It is the only signal for a backend that prints nothing until it exits,
+	// and it is what separates "working" from "hung" in `sdlc status`.
+	// 0 disables it.
+	HeartbeatInterval Duration `yaml:"heartbeat_interval"`
 }
 
 type Database struct {
@@ -90,18 +99,18 @@ type Database struct {
 }
 
 type Limits struct {
-	MaxJobDuration           Duration `yaml:"max_job_duration"`
-	MaxDesignReviewRounds    int      `yaml:"max_design_review_rounds"`
-	MaxCodeReviewRounds      int      `yaml:"max_code_review_rounds"`
-	MaxFixAttempts           int      `yaml:"max_fix_attempts"`
-	MaxFlakeRetries          int      `yaml:"max_flake_retries"`
-	FlakeRerunCount          int      `yaml:"flake_rerun_count"`
-	MaxAgentRetries          int      `yaml:"max_agent_retries"`
-	MaxReleaseRetries        int      `yaml:"max_release_retries"`
-	ReleaseRetryBackoff      Duration `yaml:"release_retry_backoff"`
-	MaxAgentInvocationsPerJob int     `yaml:"max_agent_invocations_per_job"`
-	LogExcerptLines          int      `yaml:"log_excerpt_lines"`
-	LogErrorPatterns         []string `yaml:"log_error_patterns"`
+	MaxJobDuration            Duration `yaml:"max_job_duration"`
+	MaxDesignReviewRounds     int      `yaml:"max_design_review_rounds"`
+	MaxCodeReviewRounds       int      `yaml:"max_code_review_rounds"`
+	MaxFixAttempts            int      `yaml:"max_fix_attempts"`
+	MaxFlakeRetries           int      `yaml:"max_flake_retries"`
+	FlakeRerunCount           int      `yaml:"flake_rerun_count"`
+	MaxAgentRetries           int      `yaml:"max_agent_retries"`
+	MaxReleaseRetries         int      `yaml:"max_release_retries"`
+	ReleaseRetryBackoff       Duration `yaml:"release_retry_backoff"`
+	MaxAgentInvocationsPerJob int      `yaml:"max_agent_invocations_per_job"`
+	LogExcerptLines           int      `yaml:"log_excerpt_lines"`
+	LogErrorPatterns          []string `yaml:"log_error_patterns"`
 	// VerifyVotes is how many independent verifiers each gating review finding
 	// is put to before it is allowed to stop the pipeline. 0 disables the
 	// verify pass entirely and every finding gates on the reviewer's word.
@@ -147,11 +156,11 @@ type Backend struct {
 	// bypassPermissions). For agy, "skip" passes
 	// --dangerously-skip-permissions (required for headless shell access —
 	// agy soft-denies shell commands otherwise); "default" passes nothing.
-	PermissionMode string `yaml:"permission_mode"`
-	PrintTimeout       Duration `yaml:"print_timeout"`        // agy only
-	SettingsFile       string   `yaml:"settings_file"`        // agy only
-	EnsurePermissions  []string `yaml:"ensure_permissions"`   // agy only
-	AssertModel        bool     `yaml:"assert_model"`         // agy only
+	PermissionMode     string   `yaml:"permission_mode"`
+	PrintTimeout       Duration `yaml:"print_timeout"`      // agy only
+	SettingsFile       string   `yaml:"settings_file"`      // agy only
+	EnsurePermissions  []string `yaml:"ensure_permissions"` // agy only
+	AssertModel        bool     `yaml:"assert_model"`       // agy only
 	QuotaErrorPatterns []string `yaml:"quota_error_patterns"`
 	QuotaBackoff       Duration `yaml:"quota_backoff"`
 	ExpectedVersion    string   `yaml:"expected_version"`
@@ -160,6 +169,14 @@ type Backend struct {
 	// {model} {effort} {prompt_file} placeholders. Prompt text is also piped
 	// to stdin.
 	ArgvTemplate []string `yaml:"argv_template"`
+	// StreamJSON asks the claude backend for --output-format stream-json
+	// (with --verbose, which that format requires) instead of a single JSON
+	// envelope at the end. It is what makes a long state legible while it
+	// runs: one line per tool call rather than nothing for twelve minutes.
+	// Off by default — it changes the CLI invocation, and older CLI builds
+	// may not accept the combination. Backends of other kinds stream whatever
+	// they print anyway and ignore this.
+	StreamJSON bool `yaml:"stream_json"`
 }
 
 type Agent struct {
@@ -258,10 +275,12 @@ type ShipCfg struct {
 func Default() *Config {
 	return &Config{
 		Orchestrator: Orchestrator{
-			DataDir:         "./data",
-			MaxParallelJobs: 2,
-			PollInterval:    Duration(3 * time.Second),
-			JobIDPrefix:     "JOB",
+			DataDir:           "./data",
+			MaxParallelJobs:   2,
+			PollInterval:      Duration(3 * time.Second),
+			JobIDPrefix:       "JOB",
+			StreamOutput:      true,
+			HeartbeatInterval: Duration(60 * time.Second),
 		},
 		Database: Database{BusyTimeout: Duration(5 * time.Second)},
 		Limits: Limits{

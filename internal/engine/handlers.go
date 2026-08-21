@@ -164,7 +164,7 @@ func (c *jobCtx) handleImplementing(ctx context.Context) (string, error) {
 		return "", err
 	}
 	implPath := filepath.Join(c.sdlcDir(), "implementation.json")
-	entryHead, err := c.agentBaseline(ctx)
+	entryHead, err := c.stateBaseline(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -511,7 +511,7 @@ func (c *jobCtx) handleFixing(ctx context.Context) (string, error) {
 	// resets the branch back to. If a human committed on this branch since the
 	// last orchestrator commit, a stale baseline would blame them for it and
 	// then delete their work.
-	entryHead, err := c.agentBaseline(ctx)
+	entryHead, err := c.stateBaseline(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -556,6 +556,12 @@ func (c *jobCtx) handleFixing(ctx context.Context) (string, error) {
 	}
 	if viol := guard.CheckFixDiff(changed, classification, c.e.cfg.Policies.ProtectTestsOnCodeBugFix, globs); len(viol) > 0 {
 		_ = c.repo.ResetHardClean(ctx, c.job.WorktreePath, entryHead)
+		// The fix agent's own checkpoints went with the reset. Move the record
+		// back with the branch: leaving it on a commit the branch no longer
+		// contains makes the next reconcile classify the job as "behind" and
+		// report a divergence that is really just this discard.
+		c.job.HeadSHA = entryHead
+		_ = c.e.st.UpdateJob(c.job)
 		return "", escalate("fix for code_bug touched test files %v — change discarded, human review required", viol)
 	}
 

@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
@@ -31,6 +30,10 @@ type Spec struct {
 	Allowed     []string
 	Disallowed  []string
 	LogPath     string // raw stdout+stderr envelope is written here
+	// OnProgress, when set, receives one condensed line per action the agent
+	// takes, as it takes it. Backends that emit a single JSON envelope at the
+	// end call it once or not at all; the caller's heartbeat covers those.
+	OnProgress func(string)
 }
 
 type Result struct {
@@ -91,6 +94,13 @@ func (r *Runner) Run(ctx context.Context, s Spec) (Result, error) {
 
 func (r *Runner) runClaude(ctx context.Context, s Spec) (Result, error) {
 	argv := []string{s.Backend.Binary, "-p", "--output-format", "json"}
+	// stream-json turns the run into one JSON object per event, which is the
+	// only way to see what the agent is doing before it exits. It is opt-in
+	// per backend because it changes the CLI contract (and requires --verbose),
+	// and a config that works today must keep working untouched.
+	if s.Backend.StreamJSON {
+		argv = []string{s.Backend.Binary, "-p", "--output-format", "stream-json", "--verbose"}
+	}
 	if s.Model != "" {
 		argv = append(argv, "--model", s.Model)
 	}
@@ -182,16 +192,25 @@ func (r *Runner) invoke(ctx context.Context, s Spec, argv []string, stdin string
 	if timeout == 0 {
 		timeout = s.Backend.DefaultTimeout.D()
 	}
+	var onLine func(string)
+	if s.OnProgress != nil {
+		onLine = func(line string) {
+			if c := CondenseLine(line); c != "" {
+				s.OnProgress(c)
+			}
+		}
+	}
+	// The log is written by RunCapture as output arrives, not here after the
+	// fact: an operator watching a 20-minute state needs the file to exist and
+	// grow while the agent is still running.
 	res, out, err := execx.RunCapture(ctx, execx.Cmd{
 		Argv:    argv,
 		Dir:     s.Cwd,
 		Timeout: timeout,
 		Stdin:   stdin,
+		LogPath: s.LogPath,
+		OnLine:  onLine,
 	}, 8<<20)
-	if s.LogPath != "" {
-		_ = os.MkdirAll(filepath.Dir(s.LogPath), 0o755)
-		_ = os.WriteFile(s.LogPath, []byte(out), 0o644)
-	}
 	if err != nil {
 		return Result{ExitCode: -1, Stdout: out}, err
 	}

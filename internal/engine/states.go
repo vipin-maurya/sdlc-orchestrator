@@ -18,18 +18,18 @@ const (
 	SFinalReview  = config.StFinalReview
 	// SVerifying is a configuration key, not a pipeline state: the verify
 	// pass runs inside the three review states, never as a state of its own.
-	SVerifying = config.StVerifying
+	SVerifying    = config.StVerifying
 	SAwaitMerge   = "AWAITING_MERGE_APPROVAL"
 	SMerging      = "MERGING"
 	SAwaitRelease = "AWAITING_RELEASE_APPROVAL"
 	SReleasing    = "RELEASING"
 
-	SCompleted     = "COMPLETED"
-	SCancelled     = "CANCELLED"
-	SFailed        = "FAILED"
-	SEscalated     = "ESCALATED"
-	STimedOut      = "TIMED_OUT"
-	SBlockedQuota  = "BLOCKED_ON_QUOTA"
+	SCompleted    = "COMPLETED"
+	SCancelled    = "CANCELLED"
+	SFailed       = "FAILED"
+	SEscalated    = "ESCALATED"
+	STimedOut     = "TIMED_OUT"
+	SBlockedQuota = "BLOCKED_ON_QUOTA"
 )
 
 // Terminal states: nothing will ever run again.
@@ -89,6 +89,14 @@ func isAgentState(s string) bool {
 		}
 	}
 	return false
+}
+
+// producesCode reports whether a state's agent edits the source tree, and so
+// whether its progress is worth checkpointing into commits. Reviewers and the
+// planner are excluded: they must leave the tree clean, and a commit from one
+// of them would be a policy violation rather than a checkpoint.
+func producesCode(s string) bool {
+	return s == SImplementing || s == SFixing
 }
 
 // needsWorktreeReconcile lists active states whose crash-resume semantics are

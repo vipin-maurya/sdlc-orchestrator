@@ -45,6 +45,13 @@ type Counters struct {
 	// BaseSHA is the worktree HEAD at job creation — the base every review
 	// diffs against.
 	BaseSHA string `json:"base_sha,omitempty"`
+	// StateEntryHead is the branch head when the current state began its work:
+	// the baseline its diff, its post-conditions and its test-file guard are
+	// measured against. It is persisted because a state can be re-run after a
+	// crash with its own checkpoint commits already on the branch, and a head
+	// re-read at that point would fold the state's own work into its baseline.
+	// Cleared on every transition, so each state entry captures it afresh.
+	StateEntryHead string `json:"state_entry_head,omitempty"`
 	// LastFailureLog is the log file of the most recent failed exec phase.
 	LastFailureLog string `json:"last_failure_log,omitempty"`
 	// HumanRejectReason carries the reason from a merge-gate rejection into

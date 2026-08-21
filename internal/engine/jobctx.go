@@ -212,19 +212,28 @@ func (c *jobCtx) exchangeOutputs() []string {
 	return out
 }
 
-// retryNote builds the block appended to a re-rendered prompt on retry.
+// retryNote builds the block appended to a re-rendered prompt when this state
+// has already run once in this worktree.
 //
 // The prompt is regenerated from the template on every attempt, so without
 // this the agent receives a first-attempt prompt against a worktree that is
 // already half-edited, with no signal that anything ran before — and may redo
-// completed work on top of itself. The note states what the previous attempt
-// changed, what it left in .sdlc/, and that only the quoted failure is in
-// scope.
+// completed work on top of itself. The note states what the previous run
+// changed, what it left in .sdlc/, and what is in scope now.
+//
+// lastErr is nil for the other way a state re-runs against its own output: an
+// interrupted run whose checkpoint commits are still on the branch. There is
+// no failure to quote there, but the worktree needs describing just the same.
 func (c *jobCtx) retryNote(ctx context.Context, attempt, maxRetries int, lastErr error, stateHead string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n\n# IMPORTANT — retry %d of %d\n\n", attempt+1, maxRetries+1)
-	b.WriteString("A previous attempt at this state already ran in this worktree and failed its\npost-condition check:\n\n")
-	fmt.Fprintf(&b, "    %v\n\n", lastErr)
+	if lastErr != nil {
+		fmt.Fprintf(&b, "\n\n# IMPORTANT — retry %d of %d\n\n", attempt+1, maxRetries+1)
+		b.WriteString("A previous attempt at this state already ran in this worktree and failed its\npost-condition check:\n\n")
+		fmt.Fprintf(&b, "    %v\n\n", lastErr)
+	} else {
+		b.WriteString("\n\n# IMPORTANT — this state was interrupted and is being re-run\n\n")
+		b.WriteString("An earlier run of this state was cut short (the orchestrator restarted, or the\nrun was cancelled). Its completed work was committed and is still on the branch.\n\n")
+	}
 
 	b.WriteString("## Worktree state\n\n")
 	changed, err := c.repo.DiffNamesSince(ctx, c.job.WorktreePath, stateHead)
@@ -232,13 +241,13 @@ func (c *jobCtx) retryNote(ctx context.Context, attempt, maxRetries int, lastErr
 	case err != nil:
 		b.WriteString("The worktree could not be inspected; verify the current contents of any file\nbefore editing it.\n")
 	case len(changed) == 0:
-		b.WriteString("The previous attempt left no file changes. The tree is as it was when this\nstate began.\n")
+		b.WriteString("The previous run left no file changes. The tree is as it was when this\nstate began.\n")
 	default:
-		fmt.Fprintf(&b, "The previous attempt already modified %d file(s) since this state began:\n\n", len(changed))
+		fmt.Fprintf(&b, "The previous run already modified %d file(s) since this state began:\n\n", len(changed))
 		for _, f := range changed {
 			fmt.Fprintf(&b, "- %s\n", f)
 		}
-		b.WriteString("\nThose edits are still in place and are NOT reverted between attempts. Do not\nredo them and do not undo them. Read any file before editing it — it may\nalready contain the change you were about to make.\n")
+		b.WriteString("\nThose changes are still in place and are NOT reverted. Do not redo them and do\nnot undo them. Read any file before editing it — it may already contain the\nchange you were about to make.\n")
 	}
 
 	if outs := c.exchangeOutputs(); len(outs) > 0 {
@@ -248,12 +257,36 @@ func (c *jobCtx) retryNote(ctx context.Context, attempt, maxRetries int, lastErr
 		}
 	}
 
-	b.WriteString("\n## What to do now\n\n" +
-		"Fix only the failure quoted above, then write your output file again. If the\n" +
-		"failure was in that file's encoding, format, or content, then the code changes\n" +
-		"listed above are already done and need no further work — correct the file and\n" +
-		"stop. Write it as UTF-8 with no byte-order mark and no surrounding prose.\n")
+	b.WriteString("\n## What to do now\n\n")
+	if lastErr != nil {
+		b.WriteString("Fix only the failure quoted above, then write your output file again. If the\n" +
+			"failure was in that file's encoding, format, or content, then the code changes\n" +
+			"listed above are already done and need no further work — correct the file and\n" +
+			"stop. Write it as UTF-8 with no byte-order mark and no surrounding prose.\n")
+	} else {
+		b.WriteString("Continue from what is already there: finish the work that is not done yet, and\n" +
+			"produce this state's output file covering the whole state, including the parts\n" +
+			"the earlier run completed. Write it as UTF-8 with no byte-order mark and no\n" +
+			"surrounding prose.\n")
+	}
 	return b.String()
+}
+
+// priorWorkNote returns the interrupted-run block when this state's first
+// attempt is starting against a tree that already holds its own earlier work,
+// and "" in the normal case. Checkpoint commits (SPEC §6.1) make this
+// reachable: work that used to be discarded on restart now survives it, and an
+// agent handed a first-attempt prompt against a half-finished tree is the
+// failure mode the retry note exists to prevent.
+func (c *jobCtx) priorWorkNote(ctx context.Context, maxRetries int, stateHead string) string {
+	if stateHead == "" {
+		return ""
+	}
+	changed, err := c.repo.DiffNamesSince(ctx, c.job.WorktreePath, stateHead)
+	if err != nil || len(changed) == 0 {
+		return ""
+	}
+	return c.retryNote(ctx, 0, maxRetries, nil, stateHead)
 }
 
 // runAgent renders the state's prompt, invokes the configured agent with
@@ -267,9 +300,13 @@ func (c *jobCtx) runAgent(ctx context.Context, state string, pctx prompt.Ctx, va
 	}
 	cfgDir := filepath.Dir(c.e.cfg.Path)
 	maxRetries := c.e.cfg.Limits.MaxAgentRetries
-	// Head at state entry: the baseline a retry's "what did the last attempt
-	// already do" summary is computed against.
-	stateHead, _ := c.repo.HeadSHA(ctx, c.job.WorktreePath)
+	// Head at state entry: the baseline a retry's "what did the last run
+	// already do" summary is computed against. Persisted with the job, so it
+	// survives a restart that leaves this state's checkpoints on the branch.
+	stateHead, err := c.stateBaseline(ctx)
+	if err != nil {
+		return err
+	}
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if c.job.Counters.AgentInvocations >= c.e.cfg.Limits.MaxAgentInvocationsPerJob {
@@ -281,6 +318,8 @@ func (c *jobCtx) runAgent(ctx context.Context, state string, pctx prompt.Ctx, va
 		}
 		if attempt > 0 {
 			text += c.retryNote(ctx, attempt, maxRetries, lastErr, stateHead)
+		} else {
+			text += c.priorWorkNote(ctx, maxRetries, stateHead)
 		}
 		seq := c.seq()
 		promptPath := filepath.Join(c.promptsDir(), fmt.Sprintf("%03d_%s.md", seq, state))
@@ -289,6 +328,18 @@ func (c *jobCtx) runAgent(ctx context.Context, state string, pctx prompt.Ctx, va
 
 		headBefore, _ := c.repo.HeadSHA(ctx, c.job.WorktreePath)
 		start := time.Now()
+		// The state is about to be opaque for however long the agent takes.
+		// The watcher is what keeps it legible: a heartbeat, the agent's
+		// actions as they happen, and — for the states that write code — a
+		// commit per plan step the agent reports finishing.
+		w := c.newWatcher(state)
+		c.e.event(c.job, "progress", map[string]any{
+			"state": state, "agent": agentName, "model": ag.Model,
+			"attempt": attempt + 1, "of": maxRetries + 1, "started": true,
+		})
+		c.e.logger.Printf("%s: %s started (agent %s, attempt %d/%d, timeout %s)",
+			c.job.ID, state, agentName, attempt+1, maxRetries+1, stCfg.Timeout)
+		w.run(ctx, producesCode(state))
 		res, runErr := c.e.runner.Run(ctx, agent.Spec{
 			BackendName: ag.Backend,
 			Backend:     backend,
@@ -300,7 +351,9 @@ func (c *jobCtx) runAgent(ctx context.Context, state string, pctx prompt.Ctx, va
 			Allowed:     stCfg.AllowedTools,
 			Disallowed:  stCfg.DisallowedTools,
 			LogPath:     logPath,
+			OnProgress:  w.onProgress,
 		})
+		w.stopWait()
 		headAfter, _ := c.repo.HeadSHA(ctx, c.job.WorktreePath)
 
 		c.job.Counters.AgentInvocations++
@@ -431,20 +484,32 @@ func (c *jobCtx) runPhase(ctx context.Context, phase string, argv []string, time
 	return res.ExitCode, logPath, nil
 }
 
-// agentBaseline returns the commit the current state's agent work is
-// measured against: the branch head right now, re-read from git rather than
-// taken from the job record. The two differ whenever something outside the
-// orchestrator committed on the branch — and every guard that says "the agent
-// touched these files" is only as honest as this sha.
-func (c *jobCtx) agentBaseline(ctx context.Context) (string, error) {
+// stateBaseline returns the commit the current state's work is measured
+// against — its diff, its post-conditions, and the test-file guard that can
+// roll the branch back to it.
+//
+// It is read from git, not from job.HeadSHA: that field only ever advances in
+// the orchestrator's own commit(), so a human who commits on the job branch to
+// answer an escalation is invisible to it. Diffing against a stale counter
+// charges their files to the agent and then discards them, which is exactly
+// what destroyed a verified fix in JOB-1.
+//
+// It is then persisted for the life of the state rather than re-read per run.
+// A state can be re-entered — after a crash, or after a post-condition retry —
+// with its own checkpoint commits already on the branch, and a fresh read at
+// that point would fold the state's own work into its own baseline, making
+// completed work look like it never happened.
+func (c *jobCtx) stateBaseline(ctx context.Context) (string, error) {
+	if h := c.job.Counters.StateEntryHead; h != "" {
+		return h, nil
+	}
 	sha, err := c.repo.HeadSHA(ctx, c.job.WorktreePath)
 	if err != nil {
 		return "", fmt.Errorf("read branch head for %s: %w", c.job.State, err)
 	}
-	if sha != c.job.HeadSHA {
-		c.job.HeadSHA = sha
-		_ = c.e.st.UpdateJob(c.job)
-	}
+	c.job.Counters.StateEntryHead = sha
+	c.job.HeadSHA = sha
+	_ = c.e.st.UpdateJob(c.job)
 	return sha, nil
 }
 
