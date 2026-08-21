@@ -7,11 +7,19 @@ import (
 	"github.com/vipinm/sdlc-orchestrator/internal/artifact"
 )
 
-// BlockKind is the closed set of blocks a gate document is made of. Both
-// renderers switch over this set, and TestEveryBlockKindRenders fails the build
-// the moment a kind exists with no HTML case — which is what makes drift
-// between the terminal and the browser unrepresentable rather than merely
-// testable.
+// BlockKind is the closed set of blocks a gate document is made of. Today
+// exactly one renderer switches over it — markdownBlock, in this file — and
+// three tests keep that switch honest: TestEveryBlockKindIsRegistered parses
+// this file with go/ast and fails the build when a constant declared below is
+// missing from AllBlockKinds, TestEveryBlockKindHasAMarkdownCase walks that
+// slice and fails when a kind has no case, and TestUnrenderableBlockSaysSo
+// pins what an unhandled kind degrades to.
+//
+// There is no HTML renderer yet. When one arrives it switches over the same
+// registered set, and the pair of tests above is what will stop a kind from
+// drawing in the terminal and vanishing in the browser: whoever writes it
+// should add the HTML equivalent of TestEveryBlockKindHasAMarkdownCase rather
+// than trusting the two switches to be kept in step by hand.
 type BlockKind string
 
 const (
@@ -26,9 +34,11 @@ const (
 	BlockActions   BlockKind = "actions"
 )
 
-// AllBlockKinds is what the exhaustiveness tests walk. A kind added to the
-// const block but not here is invisible to them, so the two are updated
-// together or the mechanism is off.
+// AllBlockKinds is what the exhaustiveness tests walk. Keeping it in step with
+// the const block above is not left to convention:
+// TestEveryBlockKindIsRegistered reads this file's syntax tree and compares the
+// two sets, so a kind added there and not here fails the suite whether or not
+// any render path happens to use it.
 var AllBlockKinds = []BlockKind{
 	BlockHeading, BlockParagraph, BlockFacts, BlockBullets,
 	BlockQuote, BlockCode, BlockFindings, BlockSteps, BlockActions,
@@ -44,6 +54,8 @@ const (
 	SpanPath     SpanKind = "path"     // markdown `x`; a filesystem path
 )
 
+// AllSpanKinds is the span-level twin of AllBlockKinds, held to the const block
+// below it by TestEverySpanKindIsRegistered for the same reason.
 var AllSpanKinds = []SpanKind{SpanText, SpanStrong, SpanEmphasis, SpanCode, SpanPath}
 
 type Span struct {
@@ -77,7 +89,11 @@ type Action struct {
 type Block struct {
 	Kind BlockKind
 
-	Level     int    // BlockHeading: 2 or 3
+	// BlockHeading: 1 for the document title and 2 for a section, which is
+	// every heading Render builds today. markdownBlock clamps anything outside
+	// 1..6 rather than trusting the field, and the HTML renderer must handle
+	// level 1 — it is the title every document opens with.
+	Level     int
 	Text      string // BlockHeading text; BlockCode body; BlockQuote body
 	Lang      string // BlockCode: "" or "diff"
 	Truncated bool   // BlockQuote: the source was cut at 40 lines
@@ -123,7 +139,12 @@ func markdownBlock(blk Block) (string, bool) {
 	var b strings.Builder
 	switch blk.Kind {
 	case BlockHeading:
-		fmt.Fprintf(&b, "%s %s\n\n", strings.Repeat("#", blk.Level), blk.Text)
+		// Clamped, not trusted: strings.Repeat panics on a negative count, and
+		// a level of 0 renders a leading space and no heading at all. This is
+		// the one function whose job is to keep a malformed document readable,
+		// so it may not be the thing that crashes the process showing a human
+		// their gate.
+		fmt.Fprintf(&b, "%s %s\n\n", strings.Repeat("#", headingLevel(blk.Level)), blk.Text)
 
 	case BlockParagraph:
 		// One trailing newline, not two. The blank line that follows a
@@ -237,18 +258,25 @@ func writeSpans(b *strings.Builder, spans []Span) {
 	for _, s := range spans {
 		text, ok := markdownSpan(s)
 		if !ok {
-			// Same reasoning as renderMarkdown's: unhandled is visible, never
-			// silently dropped. The text survives even when its emphasis does.
-			text = s.Text
+			// Same reasoning as renderMarkdown's, and the same shape: unhandled
+			// is visible, never silently dropped. Carrying the text through
+			// unmarked — which is what this used to do — turns a lost `x` into
+			// plain x, a difference no reader can see and no test can catch.
+			// The text still survives; only its emphasis is replaced by a
+			// statement that the emphasis was lost.
+			text = fmt.Sprintf("_unrenderable %s span: %s_", s.Kind, s.Text)
 		}
 		b.WriteString(text)
 	}
 }
 
 // markdownSpan renders one inline span, reporting whether its kind was handled.
-// The span set is closed for the same reason the block set is: the HTML
-// renderer switches over the same list, and TestEverySpanKindHasAMarkdownCase
-// is what stops one surface from learning a span the other cannot draw.
+// The span set is closed for the same reason the block set is:
+// TestEverySpanKindIsRegistered holds AllSpanKinds to the const block and
+// TestEverySpanKindHasAMarkdownCase holds this switch to AllSpanKinds, so a
+// span kind cannot exist without a rendering. A future HTML renderer switches
+// over the same registered set and needs its own equivalent of the second
+// test; the first one already covers both surfaces.
 func markdownSpan(s Span) (string, bool) {
 	switch s.Kind {
 	case SpanText:
@@ -275,6 +303,26 @@ func markdownSpan(s Span) (string, bool) {
 // The newline is its own SpanText and never folded into the preceding span: a
 // paragraph ending in an emphasis or a code span would otherwise close its
 // delimiter after the newline and emit "_x\n_".
+// The result never aliases the caller's slice. append(spans, ...) writes into
+// the variadic backing array, so para(effect...) followed by a second
+// para(effect...) — or by any later append to effect — would have the two
+// documents scribbling over each other's last span. No call site spreads a
+// slice today; the copy is what makes the first one that does harmless.
 func para(spans ...Span) Block {
-	return Block{Kind: BlockParagraph, Spans: append(spans, Span{Kind: SpanText, Text: "\n"})}
+	out := make([]Span, len(spans), len(spans)+1)
+	copy(out, spans)
+	return Block{Kind: BlockParagraph, Spans: append(out, Span{Kind: SpanText, Text: "\n"})}
+}
+
+// headingLevel clamps to the levels markdown has. Anything below 1 would make
+// strings.Repeat panic or emit a heading with no hashes; anything above 6 is
+// not a heading in any renderer, so it draws as the deepest one there is.
+func headingLevel(n int) int {
+	if n < 1 {
+		return 1
+	}
+	if n > 6 {
+		return 6
+	}
+	return n
 }

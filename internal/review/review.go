@@ -79,9 +79,13 @@ type Doc struct {
 	// DiffTruncated reports that Diff is the head of a larger patch. Both
 	// surfaces state it as a fact rather than guessing from len(Diff).
 	DiffTruncated bool
-	// Blocking counts findings that were at or above the gate threshold before
-	// the pipeline let the job through — always 0 in practice, but a non-zero
-	// value would mean a threshold was lowered, which the operator should see.
+	// Findings is how many findings the document printed, across every review
+	// section it rendered — renderReview returns len(r.Findings) and Render
+	// sums them. It is not a count of blocking findings and never was: the
+	// pipeline has already let the job through by the time a gate document is
+	// rendered, so a "blocking" count here would be 0 by construction and say
+	// nothing. A non-zero value means the operator is being shown findings
+	// that did not block, which is the whole reason renderReview prints them.
 	Findings int
 }
 
@@ -141,18 +145,45 @@ func Write(ctx context.Context, o Options) (*Doc, string, error) {
 	// worth printing once the file behind it is there to open.
 	if doc.Diff != "" {
 		diffPath := DiffPath(o.DataDir, o.Job.ID, doc.Gate)
-		if err := os.WriteFile(diffPath, []byte(doc.Diff), 0o644); err != nil {
+		payload := doc.Diff
+		if doc.DiffTruncated {
+			// A patch clipped mid-hunk at the capture cap looks exactly like a
+			// complete one to whatever opens the file next — git apply, a
+			// reviewer scrolling to the end, a tool counting hunks. The file
+			// says what happened to it in its own bytes rather than relying on
+			// the reader having also opened the document beside it.
+			if !strings.HasSuffix(payload, "\n") {
+				payload += "\n"
+			}
+			payload += diffTruncationTrailer(o.Job.WorktreePath, o.Job.Counters.BaseSHA)
+		}
+		if err := os.WriteFile(diffPath, []byte(payload), 0o644); err != nil {
 			return nil, "", err
 		}
-		// A block and a re-render, not a string concatenation: Body is a
+		spans := []Span{
+			{Kind: SpanText, Text: "\nFull patch: "},
+			{Kind: SpanPath, Text: diffPath},
+		}
+		if doc.DiffTruncated {
+			// Doc.DiffTruncated had no reader at all until here. A line that
+			// names a file without saying it is short is the document telling
+			// the operator they have the whole change when they do not.
+			spans = append(spans, Span{Kind: SpanText, Text: " (truncated at the 4 MiB capture limit)"})
+		}
+		// A block appended to both, not a string built beside them: Body is a
 		// function of Blocks everywhere else, and a line appended to one but
 		// not the other is the browser and the terminal disagreeing about
 		// whether the patch is on disk.
-		doc.Blocks = append(doc.Blocks, Block{Kind: BlockParagraph, Spans: []Span{
-			{Kind: SpanText, Text: "\nFull patch: "},
-			{Kind: SpanPath, Text: diffPath},
-		}})
-		doc.Body = renderMarkdown(doc.Blocks)
+		//
+		// Only the new block is rendered, not the whole document again.
+		// renderMarkdown is a concatenation of per-block strings, so appending
+		// this one block's markdown is the same bytes as re-rendering all of
+		// them — TestWriteKeepsBodyAFunctionOfBlocks is what holds that. The
+		// re-render copied the entire document, inlined patch included, to add
+		// one line.
+		blk := Block{Kind: BlockParagraph, Spans: spans}
+		doc.Blocks = append(doc.Blocks, blk)
+		doc.Body += renderMarkdown([]Block{blk})
 	}
 	docPath := DocPath(o.DataDir, o.Job.ID, doc.Gate)
 	if err := os.WriteFile(docPath, []byte(doc.Body), 0o644); err != nil {
@@ -341,6 +372,21 @@ func renderReview(bs *[]Block, art, name, heading string) int {
 	return len(r.Findings)
 }
 
+// diffSource is the part of gitx.Repo renderDiff uses. It exists so the
+// section's branches — the stat that failed, the patch that was clipped, the
+// inline fence — can be rendered byte for byte without a repository on disk.
+// The golden fixture is deliberately git-free, and a document whose wording is
+// only ever exercised on a machine that happens to have git installed is a
+// document nothing pins.
+type diffSource interface {
+	DiffStatSince(ctx context.Context, dir, sha string) (string, error)
+	DiffPatchSince(ctx context.Context, dir, sha string) (patch string, truncated bool, err error)
+}
+
+// openDiffSource is what renderDiff reads its diff through. Production never
+// reassigns it; tests in this package do, and never in parallel.
+var openDiffSource = func(repoPath string) diffSource { return gitx.Repo{Root: repoPath} }
+
 func renderDiff(ctx context.Context, bs *[]Block, d *Doc, o Options) {
 	base := o.Job.Counters.BaseSHA
 	if base == "" {
@@ -351,7 +397,7 @@ func renderDiff(ctx context.Context, bs *[]Block, d *Doc, o Options) {
 			aside(fmt.Sprintf("worktree %s is gone; nothing to diff", o.Job.WorktreePath)))
 		return
 	}
-	repo := gitx.Repo{Root: o.RepoPath}
+	repo := openDiffSource(o.RepoPath)
 	dctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	stat, err := repo.DiffStatSince(dctx, o.Job.WorktreePath, base)
@@ -367,8 +413,14 @@ func renderDiff(ctx context.Context, bs *[]Block, d *Doc, o Options) {
 	if err == nil {
 		d.Diff, d.DiffTruncated = patch, truncated
 		if truncated {
+			// "what follows is its head" is what this used to say, from here —
+			// above the branch that decides whether anything follows at all.
+			// With --diff off, nothing does, and the document promised a patch
+			// it never printed. What is true either way is that the capture
+			// stopped short, which is also what the reader needs in order to
+			// distrust the .diff file Write puts on disk.
 			*bs = append(*bs, aside(fmt.Sprintf(
-				"The patch exceeds the 4 MiB capture limit; what follows is its head. `git -C %s diff %s` for all of it.",
+				"The patch exceeds the 4 MiB capture limit, so only its head was captured. `git -C %s diff %s` for all of it.",
 				o.Job.WorktreePath, short(base))))
 		}
 		if o.FullDiff {
@@ -564,6 +616,16 @@ func oneLine(s string, n int) string {
 		return s
 	}
 	return string([]rune(s)[:n-1]) + "…"
+}
+
+// diffTruncationTrailer is appended to the .diff artifact when the capture cap
+// cut the patch short, so the file is self-describing. It names the command
+// that produces the whole change, because the worktree and the base sha are
+// the two things a reader of a stray .diff file does not have.
+func diffTruncationTrailer(worktree, base string) string {
+	return fmt.Sprintf("\n[sdlc] This patch stops here: it hit the 4 MiB capture limit and is only the head\n"+
+		"[sdlc] of a larger change. Run `git -C %s diff %s` for all of it.\n",
+		worktree, short(base))
 }
 
 func short(sha string) string {
