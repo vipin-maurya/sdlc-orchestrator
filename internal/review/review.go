@@ -112,28 +112,34 @@ func DiffPath(dataDir, jobID, gate string) string {
 }
 
 // Write renders and persists the document (and its patch, when there is one),
-// returning the document path. This is what the engine calls when a job parks,
-// so the artifact exists before anybody asks for it — including for a job that
-// parked overnight on a machine whose worktree has since been cleaned up.
-func Write(ctx context.Context, o Options) (string, error) {
+// returning the rendered Doc and the path it was written to. This is what the
+// engine calls when a job parks, so the artifact exists before anybody asks
+// for it — including for a job that parked overnight on a machine whose
+// worktree has since been cleaned up.
+//
+// The Doc comes back rather than just the path because the caller needs the
+// same words the document uses — the console notice and the file have to agree
+// about what is being decided, and recovering the title by re-reading the
+// markdown would make that agreement depend on the heading format.
+func Write(ctx context.Context, o Options) (*Doc, string, error) {
 	doc, err := Render(ctx, o)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	dir := Dir(o.DataDir, o.Job.ID)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
+		return nil, "", err
 	}
 	docPath := DocPath(o.DataDir, o.Job.ID, doc.Gate)
 	if err := os.WriteFile(docPath, []byte(doc.Body), 0o644); err != nil {
-		return "", err
+		return nil, "", err
 	}
 	if doc.Diff != "" {
 		if err := os.WriteFile(DiffPath(o.DataDir, o.Job.ID, doc.Gate), []byte(doc.Diff), 0o644); err != nil {
-			return "", err
+			return nil, "", err
 		}
 	}
-	return docPath, nil
+	return doc, docPath, nil
 }
 
 // Render builds the document for o.Gate. Every source it reads is optional:

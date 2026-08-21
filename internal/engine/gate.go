@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -92,7 +91,7 @@ func (e *Engine) announceGate(ctx context.Context, j *store.Job, gate string) {
 				// trail; loading it for the others would be pure cost.
 				evs, _ = e.st.ListEvents(j.ID)
 			}
-			path, err := review.Write(ctx, review.Options{
+			doc, path, err := review.Write(ctx, review.Options{
 				Job:           j,
 				Gate:          gate,
 				DataDir:       e.cfg.Orchestrator.DataDir,
@@ -106,8 +105,8 @@ func (e *Engine) announceGate(ctx context.Context, j *store.Job, gate string) {
 				e.logger.Printf("%s: render %s gate document: %v", j.ID, gate, err)
 			} else {
 				n.docPath = path
-				if title := docTitle(path); title != "" {
-					n.title = title
+				if doc.Title != "" {
+					n.title = doc.Title
 				}
 			}
 			n.headline = e.gateHeadline(ctx, j, gate, t)
@@ -119,33 +118,6 @@ func (e *Engine) announceGate(ctx context.Context, j *store.Job, gate string) {
 	e.mu.Lock()
 	e.announced[j.ID] = n
 	e.mu.Unlock()
-}
-
-// docTitle reads the headline back out of the document that was just written.
-// review.Write hands back a path rather than the rendered Doc, and the console
-// line and the document have to say the same words — keeping a second copy of
-// the gate titles here is exactly how the two surfaces drift apart.
-const docTitleScanLines = 10
-
-func docTitle(path string) string {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-	// The headline is the first bold line of the document, a few lines in. The
-	// scan stops there rather than walking the whole body, which at the merge
-	// gate carries a diffstat and every finding of the final review.
-	lines := strings.SplitN(string(b), "\n", docTitleScanLines+1)
-	for i, line := range lines {
-		if i == docTitleScanLines {
-			break
-		}
-		line = strings.TrimSpace(line)
-		if len(line) > 4 && strings.HasPrefix(line, "**") && strings.HasSuffix(line, "**") {
-			return strings.TrimSuffix(strings.TrimPrefix(line, "**"), "**")
-		}
-	}
-	return ""
 }
 
 // printGateNotice writes the notice in the house style: every line begins with
