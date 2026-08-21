@@ -48,6 +48,11 @@ before trusting it — including, and especially, when you wrote it yourself.
 | `para()` appended into its caller's backing array | `blocks.go:278` | `6a91002` |
 | Truncation notice said "what follows is its head" from above the branch deciding whether anything follows; `Doc.DiffTruncated` had no reader; the `.diff` artifact was clipped mid-hunk with no marker | `review.go:151,369` | `6a91002` |
 | `-update-golden` wrote and returned without comparing, with no CI guard | `golden_test.go:74` | `6a91002` |
+| Pure renames and copies reported a path not in the repository: `a/`/`b/` stripped from four header lines that carry no prefix | `diff.go:575` | `edb18b1` |
+| A filename ending in a space was destroyed by `TrimRight` | `diff.go:570` | `edb18b1` |
+| `Split` hung forever on a `Kind` outside the enum | `split.go:34` | `edb18b1` |
+| The 70% intra-line guard was unpinned — 0.99, 0.35, and a flipped comparison all passed | `split.go:20` | `edb18b1` |
+| `git diff` ran with the user's prefix config, so `diff.noprefix` mangled every path on that machine alone | `gitx.go:305` | `edb18b1` |
 
 Each fix carries a test that fails without it, verified by reverting the fix and
 observing the failure.
@@ -56,40 +61,27 @@ observing the failure.
 
 ## Open
 
-**`internal/diff` — none of these are fixed.** The reviewer for this area was
-cut short before editing anything.
+**`internal/diff` — the correctness bugs are fixed; three items remain.**
 
-1. **Pure renames report a path that does not exist.** `headerPath` strips an
-   `a/`/`b/` prefix from `rename from`/`rename to`/`copy from`/`copy to`, which
-   carry **unprefixed** paths. `git mv a/foo.txt a/renamed.txt` parses as
-   `foo.txt → renamed.txt`; git's own `--numstat` says `a/{foo.txt =>
-   renamed.txt}`. A rename *with* edits self-heals via the later `---` line; a
-   pure rename or copy does not. (`diff.go:575`)
-2. **`Split` hangs** on a `Kind` outside the enum — the loop advances only
-   through the three known branches. Unreachable today; exported API bound for a
-   request path. (`split.go:34`)
-3. **The 70% intra-line guard is unpinned.** Changing it to 0.99 leaves the whole
-   file green. Denominator, comparison strictness, and byte-vs-rune unit are all
-   free variables. (`split.go:20`)
-4. **A filename ending in a space is destroyed** by `TrimRight(s, " ")`. Legal on
-   POSIX, unquoted by git. Deleting the line breaks no test. (`diff.go:570`)
-5. **`File.flag` is quadratic** and its "bounded growth" comment is false — it
+1. **`File.flag` is quadratic** and its "bounded growth" comment is false — it
    dedups only identical messages while two sites emit variable text. 829 KB of
-   crafted input takes 79.6 s. Not reachable from git output; reachable by the
-   shipped fuzzer. (`diff.go:498`)
-6. **An out-of-range hunk count silently becomes 0** with no `Malformed` flag,
-   producing a deleted line with `OldNo == 0`. (`diff.go:510`)
-7. **Eight surviving mutants**, including the binary-payload exit (T1) and
-   `copy from`/`copy to`, which has no fixture anywhere.
-
-**Also open, outside `internal/diff`:** `gitx.go:305` runs `git diff` with no
-prefix flags, so a user's `diff.noprefix` or `diff.mnemonicPrefix` silently
-mangles every path. Pin `--src-prefix=a/ --dst-prefix=b/` at the call site.
+   crafted input takes 79.6 s and yields a 2.3 MB string. Not reachable from git
+   output, since every line between hunks is git's own; reachable by the shipped
+   fuzzer. (`diff.go:498`)
+2. **An out-of-range hunk count silently becomes 0** with no `Malformed` flag,
+   producing a deleted line with `OldNo == 0` — which `Line`'s own doc says
+   means the line does not exist on that side. (`diff.go:510`)
+3. **Surviving mutants.** The binary-payload exit (T1) still has 0% coverage:
+   `TestParseBinary`'s comment says the text file must survive the payload, but
+   the fixture orders the files so nothing follows it. Removing `Parse`'s
+   hand-back entirely (T3) also passes, because `stepHunk`'s short-hunk branch
+   is only ever reached at EOF, where `closeHunk` catches it first. Four smaller
+   mutants (T4-T8) likewise survive.
 
 **Also open:** `jobs.Submit` has no callers. `cmdSubmit` carries its own copy and
 the two already disagree on the empty-target exit code (2 vs 1) and the
 missing-title message, so cutting the CLI over is a behaviour change, not a
-refactor.
+refactor, and wants its own tests.
 
 ---
 
