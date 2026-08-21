@@ -153,6 +153,13 @@ git:
   cleanup_worktrees: on_success  # on_success | always | never
   delete_branch_on_success: false
 
+# server:
+#   listen: 127.0.0.1:7777      # sdlc serve binds here. Loopback only: there
+#                               # is no authentication, so a routable address
+#                               # would publish an approve button on the
+#                               # network. Remote use goes through
+#                               # ssh -L 7777:127.0.0.1:7777 host
+
 targets:
   expensetracker:
     repo_path: C:\Users\vm899\repos\ExpenseTracker

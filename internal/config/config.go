@@ -5,9 +5,11 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,6 +73,7 @@ type Config struct {
 	Policies     Policies           `yaml:"policies"`
 	Git          Git                `yaml:"git"`
 	Targets      map[string]Target  `yaml:"targets"`
+	Server       Server             `yaml:"server"`
 
 	// Path holds the absolute path of the loaded config file (not a YAML key).
 	Path string `yaml:"-"`
@@ -238,6 +241,10 @@ type Git struct {
 	DeleteBranchOnSuccess bool   `yaml:"delete_branch_on_success"`
 }
 
+type Server struct {
+	Listen string `yaml:"listen"`
+}
+
 type Target struct {
 	RepoPath      string    `yaml:"repo_path"`
 	DefaultBranch string    `yaml:"default_branch"`
@@ -396,8 +403,60 @@ func Default() *Config {
 			CodeReviewBlocksAt:      "blocker",
 			FinalReviewBlocksAt:     "blocker",
 		},
-		Git: Git{CleanupWorktrees: "on_success"},
+		Git:    Git{CleanupWorktrees: "on_success"},
+		Server: Server{Listen: "127.0.0.1:7777"},
 	}
+}
+
+// loopbackAdvice is appended to every address rejected for where it binds. A
+// refusal that only says no leaves the operator with a server they cannot reach
+// from their laptop and no sanctioned way to get there, which is how the
+// address ends up at 0.0.0.0 anyway.
+const loopbackAdvice = "sdlc serve has no authentication at all, so only a loopback address may be bound — " +
+	"anything routable publishes an approve button to the network. " +
+	"Keep 127.0.0.1 and forward it instead: ssh -L 7777:127.0.0.1:7777 host"
+
+// ValidateListen reports why addr must not be bound. It is exported because
+// `sdlc serve --addr` takes the same rule as the config key, and a second copy
+// of "which hosts count as loopback" is how the flag and the file would drift.
+//
+// allowPortZero is true only for --addr: an ephemeral port the operator cannot
+// predict is not a useful thing to write in a config file, but it is exactly
+// how a test binds without racing for a fixed one.
+func ValidateListen(addr string, allowPortZero bool) error {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("%q is not host:port: %v", addr, err)
+	}
+	// An empty host is not "unset", it is every interface — the one spelling of
+	// a routable bind that looks like an omission rather than a decision.
+	if host == "" {
+		return fmt.Errorf("%q has no host, which binds every interface. %s", addr, loopbackAdvice)
+	}
+	// "localhost" is accepted verbatim because it is what an operator types;
+	// anything else must be an IP literal that resolves to loopback locally. A
+	// name is never looked up here: a DNS answer can change after validation,
+	// and a hostname that resolves to a routable address today is exactly the
+	// case this check exists to refuse.
+	if host != "localhost" {
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("%q is not a loopback address. %s", addr, loopbackAdvice)
+		}
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return fmt.Errorf("%q: port %q is not a number", addr, port)
+	}
+	if n == 0 {
+		if !allowPortZero {
+			return fmt.Errorf("%q: port 0 asks the kernel for whatever port is free, which nobody can then be told to open; pick one", addr)
+		}
+		return nil
+	}
+	if n < 1 || n > 65535 {
+		return fmt.Errorf("%q: port %d is out of range (1-65535)", addr, n)
+	}
+	return nil
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
@@ -667,6 +726,9 @@ func (c *Config) Validate() error {
 			fail("limits.verify_min_confirm (%d) cannot exceed limits.verify_votes (%d): no finding could ever survive",
 				c.Limits.VerifyMinConfirm, c.Limits.VerifyVotes)
 		}
+	}
+	if err := ValidateListen(c.Server.Listen, false); err != nil {
+		fail("server.listen %v", err)
 	}
 	for _, p := range c.Limits.LogErrorPatterns {
 		if _, err := regexp.Compile(p); err != nil {

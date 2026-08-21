@@ -179,3 +179,76 @@ func TestUnknownHumanGateRejected(t *testing.T) {
 		t.Errorf("human_gates: [speck] was accepted: %v", err)
 	}
 }
+
+func TestDefaultServerListen(t *testing.T) {
+	if got := Default().Server.Listen; got != "127.0.0.1:7777" {
+		t.Errorf("default server.listen = %q, want 127.0.0.1:7777", got)
+	}
+	// A config file that says nothing about the server must still come out of
+	// Load bound to loopback rather than to nothing at all.
+	cfg, err := load(t, minimalTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.Listen != "127.0.0.1:7777" {
+		t.Errorf("loaded server.listen = %q, want 127.0.0.1:7777", cfg.Server.Listen)
+	}
+	if _, err := load(t, minimalTarget+"server:\n  listen: 127.0.0.1:9999\n"); err != nil {
+		t.Errorf("an explicit loopback listen was rejected: %v", err)
+	}
+}
+
+// The server has no authentication, so the bind address is the whole of its
+// access control: a routable one publishes an approve button to everything that
+// can route to this machine. The rule is checked here rather than at bind time
+// because `sdlc serve --addr` and the config key must answer it identically,
+// and the message has to name the way out (ssh -L) or the operator's next move
+// is to widen the bind until it works.
+func TestListenMustBeLoopback(t *testing.T) {
+	cases := []struct {
+		name          string
+		addr          string
+		allowPortZero bool
+		wantErr       bool
+	}{
+		{name: "IPv4 loopback", addr: "127.0.0.1:7777"},
+		{name: "the name an operator types", addr: "localhost:7777"},
+		{name: "IPv6 loopback", addr: "[::1]:7777"},
+		{name: "any interface", addr: "0.0.0.0:7777", wantErr: true},
+		{name: "no host at all", addr: ":7777", wantErr: true},
+		{name: "a name that is not localhost", addr: "example.com:7777", wantErr: true},
+		{name: "a routable IPv4", addr: "192.168.1.10:7777", wantErr: true},
+		{name: "no port", addr: "127.0.0.1", wantErr: true},
+		{name: "ephemeral port in a config file", addr: "127.0.0.1:0", wantErr: true},
+		{name: "ephemeral port from --addr", addr: "127.0.0.1:0", allowPortZero: true},
+		{name: "port out of range", addr: "127.0.0.1:99999", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateListen(tc.addr, tc.allowPortZero)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("ValidateListen(%q, %v) = %v, wantErr %v", tc.addr, tc.allowPortZero, err, tc.wantErr)
+			}
+		})
+	}
+
+	// The refusal has to teach the fix, not just refuse.
+	err := ValidateListen("0.0.0.0:7777", false)
+	if err == nil {
+		t.Fatal("0.0.0.0:7777 was accepted")
+	}
+	for _, want := range []string{"loopback", "ssh -L"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message %q does not mention %q", err, want)
+		}
+	}
+}
+
+// The config key goes through the same rule as the flag, and a rejected address
+// must fail the load rather than surface when the port is already open.
+func TestNonLoopbackListenFailsLoad(t *testing.T) {
+	_, err := load(t, minimalTarget+"server:\n  listen: 0.0.0.0:7777\n")
+	if err == nil || !strings.Contains(err.Error(), "server.listen") {
+		t.Errorf("0.0.0.0 in the config file was accepted: %v", err)
+	}
+}
