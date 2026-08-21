@@ -101,13 +101,17 @@ func (c *jobCtx) harvest(src, dest string) (string, error) {
 // stageDiffPatch writes the full diff vs the job base into
 // .sdlc/context/diff.patch for CODE_REVIEW / FINAL_REVIEW (SPEC §5.0).
 func (c *jobCtx) stageDiffPatch(ctx context.Context) error {
-	// The truncation flag is dropped here on purpose: the reviewing agent's
-	// context window binds long before 4 MiB, and changing what the engine
-	// stages for a giant patch is not this change. The gate document, which a
-	// human reads and acts on, does say so.
-	patch, _, err := c.repo.DiffPatchSince(ctx, c.job.WorktreePath, c.job.Counters.BaseSHA)
+	// The review prompts hand this file to the agent by path as "the COMPLETE
+	// change", and the agent reads it with file tools — it has no other channel
+	// to learn the capture cap clipped it. So a clipped patch says so in-band,
+	// in a trailer that contradicts the prompt's claim at the only place the
+	// agent will see it. (The gate document a human reads says so too.)
+	patch, truncated, err := c.repo.DiffPatchSince(ctx, c.job.WorktreePath, c.job.Counters.BaseSHA)
 	if err != nil {
 		return err
+	}
+	if truncated {
+		patch += "\n*** TRUNCATED AT THE CAPTURE LIMIT: this patch is the HEAD of a larger diff and is NOT the complete change. Later files and hunks are missing entirely; do not treat their absence here as evidence the change was not made. ***\n"
 	}
 	return os.WriteFile(filepath.Join(c.ctxDir(), "diff.patch"), []byte(patch), 0o644)
 }

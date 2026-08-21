@@ -2,12 +2,31 @@ package gitx
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// The test binary doubles as a git textconv driver (-noisy-textconv): it
+// copies the blob to stdout and floods stderr, which is how a real repo with a
+// chatty diff driver behaves. Reproducing that with the binary under test
+// keeps the case free of shell scripts and fixtures.
+func TestMain(m *testing.M) {
+	if len(os.Args) > 2 && os.Args[1] == "-noisy-textconv" {
+		fmt.Fprint(os.Stderr, strings.Repeat("w", 70000))
+		data, err := os.ReadFile(os.Args[2])
+		if err != nil {
+			os.Exit(1)
+		}
+		os.Stdout.Write(data)
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
 
 // git writes warnings to stderr and execx merges stderr into the captured
 // output, so `status --porcelain` output can arrive with diagnostics mixed in.
@@ -130,5 +149,67 @@ func TestDiffPatchSinceReportsTruncation(t *testing.T) {
 	}
 	if len(patch) != 4<<20 {
 		t.Errorf("patch is %d bytes, want exactly the 4 MiB cap", len(patch))
+	}
+}
+
+// git diff can talk on stderr at length and still hand back a complete patch:
+// a textconv driver that warns per blob overruns execx's 64 KiB stderr buffer
+// while stdout is whole to the last byte. Truncated describes the patch that
+// was returned, so it must stay false here — otherwise the gate document tells
+// a reviewer that a 25 KiB patch, a fraction of the 4 MiB cap, is only "its
+// head", and a truncation label that cries wolf gets ignored when a patch
+// really is clipped.
+func TestDiffPatchSinceNoisyStderrIsNotTruncation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("git runs textconv through a shell; command quoting differs on Windows")
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := tempRepo(t)
+	git(t, repo, "config", "diff.noisy.textconv", "'"+exe+"' -noisy-textconv")
+	if err := os.WriteFile(filepath.Join(repo, ".gitattributes"), []byte("*.txt diff=noisy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "add", "-A")
+	git(t, repo, "commit", "-m", "noisy diff driver")
+	base := strings.TrimSpace(git(t, repo, "rev-parse", "HEAD"))
+
+	if err := os.WriteFile(filepath.Join(repo, "app.txt"), []byte("v2\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	git(t, repo, "commit", "-am", "small change")
+
+	// Sanity: the driver really is running and really is noisy, or the case
+	// below would pass for the wrong reason.
+	cmd := exec.Command("git", "diff", base)
+	cmd.Dir = repo
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git diff: %v\n%s", err, stderr.String())
+	}
+	if stderr.Len() <= 1<<16 {
+		t.Fatalf("textconv produced %d bytes of stderr, need more than the %d-byte buffer", stderr.Len(), 1<<16)
+	}
+	if len(stdout) >= 4<<20 {
+		t.Fatalf("patch is %d bytes, no longer comfortably inside the 4 MiB cap", len(stdout))
+	}
+
+	r := Repo{Root: repo}
+	patch, truncated, err := r.DiffPatchSince(context.Background(), repo, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(patch, "+v2") {
+		t.Fatalf("patch missing the change:\n%s", patch)
+	}
+	if len(patch) != len(stdout) {
+		t.Errorf("patch is %d bytes, want the whole %d git produced", len(patch), len(stdout))
+	}
+	if truncated {
+		t.Errorf("truncated = true for a complete %d-byte patch (%.2f%% of the 4 MiB cap); only stderr overflowed, and stderr is not in this string", len(patch), float64(len(patch))*100/float64(4<<20))
 	}
 }

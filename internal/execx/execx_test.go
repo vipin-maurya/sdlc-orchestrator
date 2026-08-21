@@ -4,10 +4,12 @@ package execx
 // run identically on every platform with no shell and no fixtures.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +21,22 @@ func TestMain(m *testing.M) {
 			fmt.Println(s)
 		}
 		os.Exit(0)
+	}
+	// -noisy <stdout> <stderrBytes> <exitCode>: a command that talks on stderr
+	// while producing a perfectly complete stdout, which is what a git diff
+	// with a chatty textconv driver looks like.
+	if len(os.Args) > 4 && os.Args[1] == "-noisy" {
+		fmt.Print(os.Args[2])
+		n, err := strconv.Atoi(os.Args[3])
+		if err != nil {
+			panic(err)
+		}
+		os.Stderr.Write(bytes.Repeat([]byte("e"), n))
+		code, err := strconv.Atoi(os.Args[4])
+		if err != nil {
+			panic(err)
+		}
+		os.Exit(code)
 	}
 	os.Exit(m.Run())
 }
@@ -160,5 +178,163 @@ func TestRunCaptureReportsTruncation(t *testing.T) {
 	}
 	if len(out) != 303 {
 		t.Errorf("captured %d bytes, want the whole 303", len(out))
+	}
+}
+
+// noisyArgv builds a command that prints stdoutText, writes stderrBytes bytes
+// of diagnostics, and exits with code.
+func noisyArgv(t *testing.T, stdoutText string, stderrBytes, code int) []string {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return []string{exe, "-noisy", stdoutText, strconv.Itoa(stderrBytes), strconv.Itoa(code)}
+}
+
+// stderrCap mirrors the fixed 1<<16 cap RunCapture puts on the separated
+// stderr buffer. It is not derived from maxBytes, so it bites even when the
+// caller asked for an unbounded capture.
+const stderrCap = 1 << 16
+
+// The pair below is the whole invariant: Truncated describes the string the
+// call returned, so the same stderr overflow means different things on the two
+// return paths.
+//
+// Success returns stdout alone. A command can flood stderr — a git diff with a
+// chatty textconv driver does exactly this, at exit 0 — while its stdout is
+// complete to the last byte. Marking that capture truncated tells a reviewer a
+// whole patch is "its head", and a flag that cries wolf gets ignored when it
+// finally matters.
+func TestRunCaptureStderrOverflowLeavesSuccessUntruncated(t *testing.T) {
+	payload := strings.Repeat("p", 300)
+	res, out, err := RunCapture(context.Background(), Cmd{
+		Argv:           noisyArgv(t, payload, stderrCap+4096, 0),
+		StderrSeparate: true,
+		Timeout:        30 * time.Second,
+	}, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit %d, want 0", res.ExitCode)
+	}
+	if out != payload {
+		t.Fatalf("stdout capture is %d bytes, want the whole %d", len(out), len(payload))
+	}
+	if res.Truncated {
+		t.Errorf("Truncated = true for a complete %d-byte stdout capture; stderr overflowed but stderr is not in the returned string", len(out))
+	}
+}
+
+// The failure path returns stdout with the stderr capture appended, so bytes
+// the stderr limiter dropped are bytes missing from what the caller holds —
+// and there the flag must fire.
+func TestRunCaptureStderrOverflowTruncatesFailure(t *testing.T) {
+	payload := strings.Repeat("p", 300)
+	res, out, err := RunCapture(context.Background(), Cmd{
+		Argv:           noisyArgv(t, payload, stderrCap+4096, 3),
+		StderrSeparate: true,
+		Timeout:        30 * time.Second,
+	}, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 3 {
+		t.Fatalf("exit %d, want 3", res.ExitCode)
+	}
+	if len(out) != len(payload)+stderrCap {
+		t.Fatalf("returned %d bytes, want stdout (%d) plus a capped stderr (%d)", len(out), len(payload), stderrCap)
+	}
+	if !res.Truncated {
+		t.Errorf("Truncated = false although the returned string carries a stderr capture clipped at %d bytes", stderrCap)
+	}
+
+	// Same path, stderr that fits: nothing was dropped from the returned
+	// string, so the flag stays down. Without this the fix could degenerate
+	// into "every failure is truncated".
+	res, out, err = RunCapture(context.Background(), Cmd{
+		Argv:           noisyArgv(t, payload, 10, 3),
+		StderrSeparate: true,
+		Timeout:        30 * time.Second,
+	}, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != len(payload)+10 {
+		t.Fatalf("returned %d bytes, want %d", len(out), len(payload)+10)
+	}
+	if res.Truncated {
+		t.Errorf("Truncated = true although both captures are complete")
+	}
+}
+
+// The cap is a limit on what fits, not on what is allowed to arrive: output of
+// exactly maxBytes bytes is complete. The doc comments turn on this boundary,
+// so pin all three sides of it — an off-by-one here would silently relabel
+// every exactly-at-cap capture.
+func TestRunCaptureCapBoundary(t *testing.T) {
+	line := strings.Repeat("x", 199)
+	argv := echoArgv(t, line) // 200 bytes: the line plus its newline
+	const total = 200
+	for _, tc := range []struct {
+		cap  int64
+		want bool
+	}{
+		{total - 1, true},
+		{total, false},
+		{total + 1, false},
+	} {
+		res, out, err := RunCapture(context.Background(), Cmd{Argv: argv, Timeout: 30 * time.Second}, tc.cap)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.Truncated != tc.want {
+			t.Errorf("cap %d over %d bytes: Truncated = %v, want %v (captured %d)", tc.cap, total, res.Truncated, tc.want, len(out))
+		}
+	}
+}
+
+// limitedWriter's own boundary, away from os/exec's chunking, plus the
+// zero-length write: an empty write offers no bytes, so it can drop none. Only
+// io.Copy's nr>0 guard keeps that one out of reach today.
+func TestLimitedWriterBoundaryAndEmptyWrite(t *testing.T) {
+	var sb strings.Builder
+	l := &limitedWriter{w: &sb, n: 4}
+	if n, err := l.Write([]byte("abcd")); n != 4 || err != nil {
+		t.Fatalf("Write = (%d, %v), want (4, nil)", n, err)
+	}
+	if l.dropped() {
+		t.Errorf("dropped = true after a write of exactly the budget")
+	}
+	if n, err := l.Write(nil); n != 0 || err != nil {
+		t.Fatalf("empty Write = (%d, %v), want (0, nil)", n, err)
+	}
+	if l.dropped() {
+		t.Errorf("dropped = true after an empty write on an exhausted budget: no bytes were offered, so none went missing")
+	}
+	if _, err := l.Write([]byte("e")); err != nil {
+		t.Fatal(err)
+	}
+	if !l.dropped() {
+		t.Errorf("dropped = false after a real write past the budget")
+	}
+	if sb.String() != "abcd" {
+		t.Errorf("wrote %q, want %q", sb.String(), "abcd")
+	}
+
+	// A zero-budget writer is at its cap from the start; the same rule holds.
+	zero := &limitedWriter{w: &sb, n: 0}
+	if n, err := zero.Write([]byte{}); n != 0 || err != nil {
+		t.Fatalf("empty Write on a zero-budget writer = (%d, %v), want (0, nil)", n, err)
+	}
+	if zero.dropped() {
+		t.Errorf("zero-budget writer reports dropped bytes after being offered none")
+	}
+	if _, err := zero.Write([]byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if !zero.dropped() {
+		t.Errorf("zero-budget writer swallowed a byte without reporting it")
 	}
 }
