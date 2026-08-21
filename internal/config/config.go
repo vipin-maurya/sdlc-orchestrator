@@ -91,6 +91,11 @@ type Orchestrator struct {
 	// and it is what separates "working" from "hung" in `sdlc status`.
 	// 0 disables it.
 	HeartbeatInterval Duration `yaml:"heartbeat_interval"`
+	// GateReminderInterval is how often the engine re-announces a job that is
+	// waiting for a human. A gate announced once scrolls off the console and
+	// the job then waits forever in silence, which is indistinguishable from
+	// the engine having stalled. 0 announces each gate once and never repeats.
+	GateReminderInterval Duration `yaml:"gate_reminder_interval"`
 }
 
 type Database struct {
@@ -208,6 +213,24 @@ type Policies struct {
 	DesignReviewBlocksAt string `yaml:"design_review_blocks_at"`
 	CodeReviewBlocksAt   string `yaml:"code_review_blocks_at"`
 	FinalReviewBlocksAt  string `yaml:"final_review_blocks_at"`
+	// HumanGates adds human checkpoints earlier than the merge gate:
+	//   spec — after design review passes, before any code is written
+	//   code — after code review passes, before build and test
+	// The merge and release gates are always enforced and need not be listed
+	// (listing them is accepted, so a config may spell out all four). Empty by
+	// default: an unattended run should not acquire a new place to stop
+	// because this key exists.
+	HumanGates []string `yaml:"human_gates"`
+}
+
+// HumanGate reports whether an optional human checkpoint is enabled.
+func (p Policies) HumanGate(name string) bool {
+	for _, g := range p.HumanGates {
+		if strings.EqualFold(strings.TrimSpace(g), name) {
+			return true
+		}
+	}
+	return false
 }
 
 type Git struct {
@@ -275,12 +298,13 @@ type ShipCfg struct {
 func Default() *Config {
 	return &Config{
 		Orchestrator: Orchestrator{
-			DataDir:           "./data",
-			MaxParallelJobs:   2,
-			PollInterval:      Duration(3 * time.Second),
-			JobIDPrefix:       "JOB",
-			StreamOutput:      true,
-			HeartbeatInterval: Duration(60 * time.Second),
+			DataDir:              "./data",
+			MaxParallelJobs:      2,
+			PollInterval:         Duration(3 * time.Second),
+			JobIDPrefix:          "JOB",
+			StreamOutput:         true,
+			HeartbeatInterval:    Duration(60 * time.Second),
+			GateReminderInterval: Duration(10 * time.Minute),
 		},
 		Database: Database{BusyTimeout: Duration(5 * time.Second)},
 		Limits: Limits{
@@ -570,6 +594,13 @@ func (c *Config) Validate() error {
 		case "blocker", "major", "minor", "nit":
 		default:
 			fail("policies.%s must be blocker|major|minor|nit, got %q", key, sev)
+		}
+	}
+	for _, g := range c.Policies.HumanGates {
+		switch strings.ToLower(strings.TrimSpace(g)) {
+		case "spec", "code", "merge", "release":
+		default:
+			fail("policies.human_gates: unknown gate %q (spec|code|merge|release)", g)
 		}
 	}
 	for name, b := range c.Backends {
