@@ -112,3 +112,53 @@ func TestLineWriterFlushesOverlongLine(t *testing.T) {
 		t.Errorf("remainder buffered = %d bytes, want 10", len(lw.buf))
 	}
 }
+
+// A capture that stopped at the cap and one that merely fit inside it return
+// the same kind of string, so the flag is the only thing that tells them
+// apart. Callers that stage a patch for a human to approve depend on it.
+func TestRunCaptureReportsTruncation(t *testing.T) {
+	line := strings.Repeat("x", 100)
+	argv := echoArgv(t, line, line, line) // 303 bytes: 3 lines plus newlines
+
+	// The cap falls inside a write rather than on its boundary, so this also
+	// pins that hitting it is not an error: a limiter that reported the short
+	// write honestly would make os/exec fail the command instead.
+	const capBytes = 50
+	res, out, err := RunCapture(context.Background(), Cmd{Argv: argv, Timeout: 30 * time.Second}, capBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ExitCode != 0 {
+		t.Fatalf("exit %d: %s", res.ExitCode, out)
+	}
+	if !res.Truncated {
+		t.Errorf("Truncated = false for %d bytes of output under a %d-byte cap", 303, capBytes)
+	}
+	if len(out) != capBytes {
+		t.Errorf("captured %d bytes, want exactly %d", len(out), capBytes)
+	}
+
+	res, out, err = RunCapture(context.Background(), Cmd{Argv: argv, Timeout: 30 * time.Second}, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Truncated {
+		t.Errorf("Truncated = true under a 1 MiB cap for %d bytes of output", len(out))
+	}
+	if len(out) != 303 {
+		t.Errorf("captured %d bytes, want the whole 303", len(out))
+	}
+
+	// maxBytes == 0 builds no limiter at all; dropped() answers for the
+	// limiter that does not exist rather than the caller checking for nil.
+	res, out, err = RunCapture(context.Background(), Cmd{Argv: argv, Timeout: 30 * time.Second}, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Truncated {
+		t.Errorf("Truncated = true with maxBytes 0 (unbounded)")
+	}
+	if len(out) != 303 {
+		t.Errorf("captured %d bytes, want the whole 303", len(out))
+	}
+}

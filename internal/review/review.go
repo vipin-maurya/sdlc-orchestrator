@@ -72,6 +72,9 @@ type Doc struct {
 	// Diff is the full patch when one was produced ("" otherwise). It is kept
 	// out of Body so the caller can write it to its own file.
 	Diff string
+	// DiffTruncated reports that Diff is the head of a larger patch. Both
+	// surfaces state it as a fact rather than guessing from len(Diff).
+	DiffTruncated bool
 	// Blocking counts findings that were at or above the gate threshold before
 	// the pipeline let the job through — always 0 in practice, but a non-zero
 	// value would mean a threshold was lowered, which the operator should see.
@@ -342,9 +345,13 @@ func renderDiff(ctx context.Context, b *strings.Builder, d *Doc, o Options) {
 	}
 	b.WriteString("## Diff vs base\n\n")
 	fmt.Fprintf(b, "```\n%s\n```\n\n", strings.TrimRight(stat, "\n"))
-	patch, err := repo.DiffPatchSince(dctx, o.Job.WorktreePath, base)
+	patch, truncated, err := repo.DiffPatchSince(dctx, o.Job.WorktreePath, base)
 	if err == nil {
-		d.Diff = patch
+		d.Diff, d.DiffTruncated = patch, truncated
+		if truncated {
+			fmt.Fprintf(b, "_The patch exceeds the 4 MiB capture limit; what follows is its head. `git -C %s diff %s` for all of it._\n\n",
+				o.Job.WorktreePath, short(base))
+		}
 		if o.FullDiff {
 			fmt.Fprintf(b, "```diff\n%s\n```\n\n", strings.TrimRight(patch, "\n"))
 		} else {

@@ -44,10 +44,19 @@ type Result struct {
 	Duration time.Duration
 	TimedOut bool
 	LogPath  string
+	// Truncated reports that maxBytes stopped the returned string short of the
+	// command's real output. limitedWriter reports a full write after it has
+	// stopped copying — it has to, or os/exec would tear the command down with
+	// a short-write error — so without this flag a caller cannot distinguish a
+	// 4 MiB patch from the head of a 40 MiB one. A reviewer approving a merge
+	// from a patch that was silently clipped is deciding on a change they have
+	// not seen.
+	Truncated bool
 }
 
 // Run executes the command. A non-zero exit is NOT a Go error; err is
-// reserved for spawn/plumbing failures.
+// reserved for spawn/plumbing failures. Run captures nothing and so caps
+// nothing: its Result.Truncated is always false.
 func Run(ctx context.Context, c Cmd) (Result, error) {
 	if len(c.Argv) == 0 {
 		return Result{}, fmt.Errorf("empty argv")
@@ -125,8 +134,14 @@ func RunCapture(ctx context.Context, c Cmd, maxBytes int64) (Result, string, err
 	}
 	var sb strings.Builder
 	var w io.Writer = &sb
+	// The limiter is held as a concrete *limitedWriter, not just as the
+	// io.Writer it is wrapped into below, because whether it dropped anything
+	// is only readable off the struct — once it is inside a MultiWriter there
+	// is nothing left to ask.
+	var lw *limitedWriter
 	if maxBytes > 0 {
-		w = &limitedWriter{w: &sb, n: maxBytes}
+		lw = &limitedWriter{w: &sb, n: maxBytes}
+		w = lw
 	}
 	// The captured string is bounded; the log file is not. A truncated capture
 	// must not truncate the log an operator reads afterwards, so the two are
@@ -154,11 +169,13 @@ func RunCapture(ctx context.Context, c Cmd, maxBytes int64) (Result, string, err
 	}
 	cmd.Stdout = w
 	var errb strings.Builder
+	var elw *limitedWriter
 	if c.StderrSeparate {
 		// Diagnostics stay out of the parsed string but still reach the log:
 		// a backend that fails with everything on stderr must not produce an
 		// empty log file.
-		var ew io.Writer = &limitedWriter{w: &errb, n: 1 << 16}
+		elw = &limitedWriter{w: &errb, n: 1 << 16}
+		var ew io.Writer = elw
 		if side != nil {
 			ew = io.MultiWriter(ew, side)
 		}
@@ -168,7 +185,10 @@ func RunCapture(ctx context.Context, c Cmd, maxBytes int64) (Result, string, err
 	}
 	start := time.Now()
 	err := cmd.Run()
-	res := Result{Duration: time.Since(start)}
+	// Both limiters count: on the error path withErr appends the stderr
+	// capture to the string the caller gets back, so bytes dropped from either
+	// one are bytes missing from that string.
+	res := Result{Duration: time.Since(start), Truncated: lw.dropped() || elw.dropped()}
 	out := sb.String()
 	// Failed commands get their stderr back: the caller is reporting, not
 	// parsing. Successful ones keep stdout clean.
@@ -253,20 +273,33 @@ func (s *syncWriter) Write(p []byte) (int, error) {
 }
 
 type limitedWriter struct {
-	w io.Writer
-	n int64
+	w    io.Writer
+	n    int64
+	over bool // set once bytes have been dropped
 }
 
+// dropped is nil-safe so RunCapture can ask about a limiter it never built
+// (maxBytes == 0, or stderr not separated) without a nil check at each site.
+func (l *limitedWriter) dropped() bool { return l != nil && l.over }
+
 func (l *limitedWriter) Write(p []byte) (int, error) {
+	// full, not len(p) after the clamp below: os/exec copies through io.Copy,
+	// which turns any short write into ErrShortWrite and fails the whole
+	// command. A writer that exists to drop bytes therefore has to claim it
+	// took them all, and `over` is the only record that it did not — which is
+	// exactly why the Truncated flag has to be carried out of band.
+	full := len(p)
 	if l.n <= 0 {
-		return len(p), nil // swallow silently; caller keeps the head
+		l.over = true
+		return full, nil // swallow silently; caller keeps the head
 	}
 	if int64(len(p)) > l.n {
 		p = p[:l.n]
+		l.over = true
 	}
 	n, err := l.w.Write(p)
 	l.n -= int64(n)
-	return len(p), err
+	return full, err
 }
 
 // adaptWindows wraps .bat/.cmd entrypoints in `cmd /c` and resolves

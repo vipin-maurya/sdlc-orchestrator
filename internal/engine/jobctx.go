@@ -101,7 +101,11 @@ func (c *jobCtx) harvest(src, dest string) (string, error) {
 // stageDiffPatch writes the full diff vs the job base into
 // .sdlc/context/diff.patch for CODE_REVIEW / FINAL_REVIEW (SPEC §5.0).
 func (c *jobCtx) stageDiffPatch(ctx context.Context) error {
-	patch, err := c.repo.DiffPatchSince(ctx, c.job.WorktreePath, c.job.Counters.BaseSHA)
+	// The truncation flag is dropped here on purpose: the reviewing agent's
+	// context window binds long before 4 MiB, and changing what the engine
+	// stages for a giant patch is not this change. The gate document, which a
+	// human reads and acts on, does say so.
+	patch, _, err := c.repo.DiffPatchSince(ctx, c.job.WorktreePath, c.job.Counters.BaseSHA)
 	if err != nil {
 		return err
 	}
