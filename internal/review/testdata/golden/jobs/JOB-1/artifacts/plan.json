@@ -1,0 +1,24 @@
+{
+  "schema": "plan/1",
+  "steps": [
+    {
+      "id": "S1",
+      "description": "Add redact.Line and the pattern table it reads.",
+      "files": ["internal/execx/redact.go"],
+      "verification": "go test ./internal/execx/ -run TestRedact"
+    },
+    {
+      "id": "S2",
+      "description": "Call redact.Line from the capture path, once, where bytes become a line.",
+      "files": ["internal/execx/execx.go", "internal/execx/redact.go"],
+      "verification": "go test ./internal/execx/ -race"
+    },
+    {
+      "id": "S3",
+      "description": "Document the pattern table beside the config key that feeds it."
+    }
+  ],
+  "risks": [
+    "A pattern that is too broad redacts a legitimate failure message and makes the log useless exactly when it is needed."
+  ]
+}

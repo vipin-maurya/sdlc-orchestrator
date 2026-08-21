@@ -1,0 +1,14 @@
+{
+  "schema": "review/1",
+  "reviewed": "diff",
+  "summary": "ROUND 2 UNVERIFIED SUMMARY — this text must never reach a gate document; the verified copy of round 2 supersedes it.",
+  "findings": [
+    {
+      "id": "CR-1",
+      "severity": "blocker",
+      "file": "internal/execx/redact.go",
+      "description": "The pattern table is compiled on every call.",
+      "recommendation": "Compile once at load."
+    }
+  ]
+}
