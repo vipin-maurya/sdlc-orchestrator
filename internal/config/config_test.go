@@ -252,3 +252,107 @@ func TestNonLoopbackListenFailsLoad(t *testing.T) {
 		t.Errorf("0.0.0.0 in the config file was accepted: %v", err)
 	}
 }
+
+// The carve-out this replaces accepted the literal string "localhost" and
+// returned it to be bound as-is, which trusts /etc/hosts: a machine that maps
+// localhost to a routable address would have passed validation and then bound
+// that address. Normalizing to the literal that gets bound closes the gap
+// without a lookup, so the assertion is on the returned string, not on nil.
+func TestNormalizeListenNeverTrustsAHostname(t *testing.T) {
+	got, err := NormalizeListen("localhost:7777", false)
+	if err != nil {
+		t.Fatalf("NormalizeListen(localhost:7777) = %v", err)
+	}
+	if got != "127.0.0.1:7777" {
+		t.Fatalf("NormalizeListen(localhost:7777) = %q, want 127.0.0.1:7777 — the bound string must be an IP literal", got)
+	}
+	// Every other name is refused outright rather than resolved, including the
+	// ones that look local.
+	for _, addr := range []string{"localhost.localdomain:7777", "LOCALHOST:7777", "example.com:7777", "myhost:7777"} {
+		if got, err := NormalizeListen(addr, false); err == nil {
+			t.Errorf("NormalizeListen(%q) = %q, want a refusal: a name is not an address", addr, got)
+		}
+	}
+}
+
+// Whatever a caller binds has to be the string this function returned, so the
+// returned string has to be a valid listen address for every accepted input.
+func TestNormalizeListenReturnsABindableAddress(t *testing.T) {
+	for _, tc := range []struct{ addr, want string }{
+		{"127.0.0.1:7777", "127.0.0.1:7777"},
+		{"localhost:7777", "127.0.0.1:7777"},
+		{"[::1]:7777", "[::1]:7777"},
+		{"127.0.0.2:7777", "127.0.0.2:7777"},
+	} {
+		got, err := NormalizeListen(tc.addr, false)
+		if err != nil {
+			t.Errorf("NormalizeListen(%q) = %v", tc.addr, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("NormalizeListen(%q) = %q, want %q", tc.addr, got, tc.want)
+		}
+	}
+	// Port 0 is only reachable through --addr, and the caller binds it too.
+	if got, err := NormalizeListen("localhost:0", true); err != nil || got != "127.0.0.1:0" {
+		t.Errorf("NormalizeListen(localhost:0, true) = %q, %v; want 127.0.0.1:0", got, err)
+	}
+}
+
+// Every refusal on this path has to tell the operator what to do instead, and
+// the empty value is the one whose answer is "delete the line".
+func TestEmptyListenSaysHowToFixIt(t *testing.T) {
+	err := ValidateListen("", false)
+	if err == nil {
+		t.Fatal("an empty listen was accepted")
+	}
+	for _, want := range []string{"delete the key", defaultListen, "ssh -L"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message %q does not mention %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "missing port in address") {
+		t.Errorf("empty listen reported as a malformed host:port: %v", err)
+	}
+}
+
+// Atoi accepted a sign and leading zeros, so "+7777" and "0007777" named a port
+// nobody wrote. The set of accepted ports is exactly the decimal numbers 1-65535
+// (plus 0 for --addr).
+func TestListenPortAcceptsOnlyPlainDecimal(t *testing.T) {
+	for _, addr := range []string{
+		"127.0.0.1:+7777",
+		"127.0.0.1:07777",
+		"127.0.0.1:0007777",
+		"127.0.0.1:-1",
+		"127.0.0.1:7777x",
+		"127.0.0.1:0x1e61",
+		"127.0.0.1: 7777",
+	} {
+		if got, err := NormalizeListen(addr, false); err == nil {
+			t.Errorf("NormalizeListen(%q) = %q, want a refusal", addr, got)
+		}
+	}
+	if _, err := NormalizeListen("127.0.0.1:7777", false); err != nil {
+		t.Errorf("a plain decimal port was refused: %v", err)
+	}
+	// The range still has to be named: "65536" is the number an operator most
+	// often reaches for, and the message is the only place the bound appears.
+	err := ValidateListen("127.0.0.1:65536", false)
+	if err == nil {
+		t.Fatal("port 65536 was accepted")
+	}
+	if !strings.Contains(err.Error(), "1-65535") {
+		t.Errorf("out-of-range message %q does not name the range", err)
+	}
+	if err := ValidateListen("127.0.0.1:65535", false); err != nil {
+		t.Errorf("port 65535 was refused: %v", err)
+	}
+	// allowPortZero still means what it meant.
+	if err := ValidateListen("127.0.0.1:0", true); err != nil {
+		t.Errorf("port 0 with allowPortZero was refused: %v", err)
+	}
+	if err := ValidateListen("127.0.0.1:0", false); err == nil {
+		t.Error("port 0 was accepted in a config file")
+	}
+}

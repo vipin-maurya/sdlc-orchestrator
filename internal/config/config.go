@@ -4,6 +4,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -404,9 +405,13 @@ func Default() *Config {
 			FinalReviewBlocksAt:     "blocker",
 		},
 		Git:    Git{CleanupWorktrees: "on_success"},
-		Server: Server{Listen: "127.0.0.1:7777"},
+		Server: Server{Listen: defaultListen},
 	}
 }
+
+// defaultListen is the address a config that says nothing about the server
+// gets, and the one named in the advice below.
+const defaultListen = "127.0.0.1:7777"
 
 // loopbackAdvice is appended to every address rejected for where it binds. A
 // refusal that only says no leaves the operator with a server they cannot reach
@@ -416,47 +421,75 @@ const loopbackAdvice = "sdlc serve has no authentication at all, so only a loopb
 	"anything routable publishes an approve button to the network. " +
 	"Keep 127.0.0.1 and forward it instead: ssh -L 7777:127.0.0.1:7777 host"
 
-// ValidateListen reports why addr must not be bound. It is exported because
-// `sdlc serve --addr` takes the same rule as the config key, and a second copy
-// of "which hosts count as loopback" is how the flag and the file would drift.
+// NormalizeListen returns the exact string the caller must hand to net.Listen,
+// or reports why addr must not be bound. The caller MUST bind the returned
+// value and never the raw config value: validating one string and binding
+// another leaves a window in which the two disagree — a name resolved at bind
+// time can answer with a routable address that the check never saw — and this
+// function is the whole of `sdlc serve`'s access control.
+//
+// It is exported because `sdlc serve --addr` takes the same rule as the config
+// key, and a second copy of "which hosts count as loopback" is how the flag and
+// the file would drift.
 //
 // allowPortZero is true only for --addr: an ephemeral port the operator cannot
 // predict is not a useful thing to write in a config file, but it is exactly
 // how a test binds without racing for a fixed one.
-func ValidateListen(addr string, allowPortZero bool) error {
+func NormalizeListen(addr string, allowPortZero bool) (string, error) {
+	// An empty value is the one rejection an operator can fix by deleting a
+	// line, so say that rather than reporting a malformed host:port.
+	if addr == "" {
+		return "", fmt.Errorf("is empty: delete the key to take the default %s, or name a loopback address. %s", defaultListen, loopbackAdvice)
+	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("%q is not host:port: %v", addr, err)
+		return "", fmt.Errorf("%q is not host:port: %v", addr, err)
 	}
 	// An empty host is not "unset", it is every interface — the one spelling of
 	// a routable bind that looks like an omission rather than a decision.
 	if host == "" {
-		return fmt.Errorf("%q has no host, which binds every interface. %s", addr, loopbackAdvice)
+		return "", fmt.Errorf("%q has no host, which binds every interface. %s", addr, loopbackAdvice)
 	}
-	// "localhost" is accepted verbatim because it is what an operator types;
-	// anything else must be an IP literal that resolves to loopback locally. A
-	// name is never looked up here: a DNS answer can change after validation,
-	// and a hostname that resolves to a routable address today is exactly the
-	// case this check exists to refuse.
-	if host != "localhost" {
-		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
-			return fmt.Errorf("%q is not a loopback address. %s", addr, loopbackAdvice)
-		}
+	// "localhost" is accepted because it is what an operator types, but it is
+	// rewritten here to the literal that gets bound rather than passed through:
+	// an /etc/hosts entry mapping localhost to a routable address would
+	// otherwise sail through this check and bind that address. No name is ever
+	// looked up: a DNS answer can change after validation, and a hostname that
+	// resolves to a routable address today is exactly the case this check
+	// exists to refuse.
+	if host == "localhost" {
+		host = "127.0.0.1"
+	} else if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return "", fmt.Errorf("%q is not a loopback address. %s", addr, loopbackAdvice)
 	}
-	n, err := strconv.Atoi(port)
+	// ParseUint rather than Atoi: Atoi also accepts "+7777" and "0007777",
+	// which are not ports anybody meant to write, and its int result then needs
+	// a second range check that ParseUint's bitSize does for free.
+	n, err := strconv.ParseUint(port, 10, 16)
 	if err != nil {
-		return fmt.Errorf("%q: port %q is not a number", addr, port)
-	}
-	if n == 0 {
-		if !allowPortZero {
-			return fmt.Errorf("%q: port 0 asks the kernel for whatever port is free, which nobody can then be told to open; pick one", addr)
+		if errors.Is(err, strconv.ErrRange) {
+			return "", fmt.Errorf("%q: port %s is out of range (1-65535)", addr, port)
 		}
-		return nil
+		return "", fmt.Errorf("%q: port %q is not a number", addr, port)
 	}
-	if n < 1 || n > 65535 {
-		return fmt.Errorf("%q: port %d is out of range (1-65535)", addr, n)
+	if len(port) > 1 && port[0] == '0' {
+		return "", fmt.Errorf("%q: port %q has a leading zero; write it as %d", addr, port, n)
 	}
-	return nil
+	if n == 0 && !allowPortZero {
+		return "", fmt.Errorf("%q: port 0 asks the kernel for whatever port is free, which nobody can then be told to open; pick one", addr)
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+// ValidateListen reports why addr must not be bound. It is a thin wrapper over
+// NormalizeListen for callers that only check — config validation, `sdlc
+// validate` — and is not enough for a caller that then binds: that one must
+// bind NormalizeListen's result.
+//
+// allowPortZero is true only for --addr, as above.
+func ValidateListen(addr string, allowPortZero bool) error {
+	_, err := NormalizeListen(addr, allowPortZero)
+	return err
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)

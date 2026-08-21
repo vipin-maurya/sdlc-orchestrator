@@ -159,6 +159,9 @@ git:
 #                               # would publish an approve button on the
 #                               # network. Remote use goes through
 #                               # ssh -L 7777:127.0.0.1:7777 host
+#   # The IPv6 loopback must be quoted. Written bare, listen: [::1]:7777 is a
+#   # YAML flow sequence, not a string, and the file fails to parse:
+#   listen: "[::1]:7777"
 
 targets:
   expensetracker:
