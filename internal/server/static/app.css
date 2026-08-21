@@ -1,0 +1,184 @@
+/* The whole stylesheet. Owned by W2-G; W2-K adds diff.css beside it.
+ *
+ * Installed fonts only, and nothing is imported or downloaded: `sdlc serve`
+ * must render identically on a machine with no network, and a webfont request
+ * would also tell whoever serves it which gates the operator is reading.
+ * TestNoExternalResources greps this file for the directives that would do it,
+ * which is why none of them appear even in a comment. */
+
+:root {
+  --bg: #14161a;
+  --panel: #1b1e24;
+  --line: #2c313a;
+  --fg: #dfe3ea;
+  --dim: #98a1b0;
+  --link: #7fb3ff;
+  --ok: #4fbf7f;
+  --warn: #e0a83a;
+  --bad: #e2685f;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "DejaVu Sans Mono",
+          Consolas, "Liberation Mono", Menlo, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+          "Noto Sans", sans-serif;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f7f8fa; --panel: #ffffff; --line: #d9dee6; --fg: #1a1d23;
+    --dim: #5c6572; --link: #1a56b8; --ok: #1f7a45; --warn: #8a5d00; --bad: #ad2a20;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 15px/1.5 var(--sans);
+}
+
+a { color: var(--link); }
+a:hover { text-decoration: underline; }
+
+/* --- chrome ------------------------------------------------------------ */
+
+header.top {
+  display: flex;
+  align-items: center;
+  gap: 1.25rem;
+  padding: .6rem 1.1rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+}
+
+.brand { font-weight: 600; letter-spacing: .04em; text-decoration: none; }
+header.top nav { display: flex; gap: 1rem; flex: 1; }
+header.top nav a { text-decoration: none; color: var(--dim); }
+header.top nav a.on { color: var(--fg); border-bottom: 2px solid var(--link); }
+
+/* The pill has three states and app.js sets the modifier class. It is empty
+ * until then: a page served with JavaScript off makes no freshness claim,
+ * because it has no way to keep one true. */
+.pill {
+  font: 12px/1 var(--mono);
+  padding: .35rem .55rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--dim);
+  white-space: nowrap;
+}
+.pill.live  { color: var(--ok);   border-color: var(--ok); }
+.pill.stale { color: var(--warn); border-color: var(--warn); }
+.pill.down  { color: var(--bad);  border-color: var(--bad); }
+
+main { padding: 1.1rem; max-width: 1400px; }
+footer { padding: 1rem 1.1rem; color: var(--dim); font-size: 12px; }
+
+h1 { font-size: 1.35rem; margin: 0 0 .8rem; }
+h2 { font-size: 1.1rem; margin: 1.4rem 0 .5rem; }
+h3 { font-size: 1rem; margin: 1.1rem 0 .4rem; }
+
+/* --- banners ----------------------------------------------------------- */
+
+.banner {
+  margin: 0;
+  padding: .6rem 1.1rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 14px;
+}
+.banner.warn { background: color-mix(in srgb, var(--warn) 14%, var(--panel)); }
+.banner.bad  { background: color-mix(in srgb, var(--bad) 14%, var(--panel)); }
+.err { color: var(--bad); }
+
+/* --- tables ------------------------------------------------------------ */
+
+table { border-collapse: collapse; width: 100%; }
+th, td {
+  text-align: left;
+  padding: .45rem .6rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+th { color: var(--dim); font-weight: 500; font-size: 13px; }
+tbody tr:hover { background: var(--panel); }
+td.num { text-align: right; font-family: var(--mono); }
+
+/* --- badges ------------------------------------------------------------ */
+
+.badge {
+  display: inline-block;
+  font: 12px/1 var(--mono);
+  padding: .25rem .45rem;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  color: var(--dim);
+}
+.badge.gate     { color: var(--warn); border-color: var(--warn); }
+.badge.running  { color: var(--ok);   border-color: var(--ok); }
+.badge.bad      { color: var(--bad);  border-color: var(--bad); }
+.badge.blocker  { color: var(--bad);  border-color: var(--bad); }
+.badge.major    { color: var(--warn); border-color: var(--warn); }
+.badge.minor,
+.badge.nit      { color: var(--dim); }
+
+/* --- documents and code ------------------------------------------------ */
+
+.doc { max-width: 62rem; }
+.doc p { margin: .6rem 0; }
+.doc li { margin: .25rem 0; }
+
+code, kbd, samp { font-family: var(--mono); font-size: .92em; }
+pre {
+  font-family: var(--mono);
+  font-size: 13px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: .7rem .8rem;
+  overflow-x: auto;
+}
+pre#logtail { max-height: 70vh; overflow-y: auto; }
+
+dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1rem; }
+dl.facts dt { color: var(--dim); }
+dl.facts dd { margin: 0; font-family: var(--mono); font-size: 13px; word-break: break-all; }
+
+/* --- forms ------------------------------------------------------------- */
+
+form.decision { margin: 1rem 0; padding: .9rem; background: var(--panel);
+                border: 1px solid var(--line); border-radius: 6px; }
+label { display: block; margin: .5rem 0 .2rem; color: var(--dim); font-size: 13px; }
+input[type=text], textarea, select {
+  width: 100%;
+  padding: .45rem .5rem;
+  background: var(--bg);
+  color: var(--fg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: inherit;
+}
+textarea { min-height: 7rem; font-family: var(--mono); font-size: 13px; }
+
+button {
+  font: inherit;
+  padding: .45rem .9rem;
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--fg);
+  cursor: pointer;
+}
+button:hover { border-color: var(--link); }
+button.primary { border-color: var(--ok); color: var(--ok); }
+button.danger  { border-color: var(--bad); color: var(--bad); }
+
+/* Set by app.js when the stream says the job has moved. The reason is rendered
+ * beside the form; a disabled button with no explanation reads as a bug. */
+button[disabled], form.decision[data-disabled] button {
+  opacity: .45;
+  cursor: not-allowed;
+}
+
+.muted { color: var(--dim); }
+.right { text-align: right; }

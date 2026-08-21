@@ -1,0 +1,48 @@
+{{/*
+  The shared layout. Owned by W2-G and not edited after the skeleton commit:
+  every W2.1 owner's page supplies "content" and nothing else.
+
+  Every URL below comes from the asset map, which serves only files embedded in
+  the binary. Nothing on any page may reference an external host: `sdlc serve`
+  has to work on a machine with no network, and a UI that fetches a font from a
+  CDN also tells that CDN which gates the operator is looking at.
+*/}}<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}} — sdlc</title>
+<link rel="stylesheet" href="{{asset "app.css"}}">
+{{/* diff.css is linked here rather than from diff.html so W2-K never has to
+     edit this file; it is a few kilobytes and immutable-cached. */}}
+<link rel="stylesheet" href="{{asset "diff.css"}}">
+<script src="{{asset "app.js"}}" defer></script>
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="/jobs">sdlc</a>
+  <nav>
+    <a href="/jobs" {{if eq .Nav "jobs"}}class="on"{{end}}>Jobs</a>
+    <a href="/submit" {{if eq .Nav "submit"}}class="on"{{end}}>Submit</a>
+    <a href="/config" {{if eq .Nav "config"}}class="on"{{end}}>Config</a>
+  </nav>
+  {{/* The pill's text is written by app.js from the stream's age. Nothing
+       server-side claims freshness: a "live" rendered on the server is a claim
+       about a moment that has already passed by the time it is read. */}}
+  <span id="live-pill" class="pill">&nbsp;</span>
+</header>
+
+{{if not .EngineUp}}
+<p class="banner warn">No engine appears to be running — decisions you record
+here are stored and applied when one starts.</p>
+{{end}}
+
+<main>
+{{template "content" .}}
+</main>
+
+<footer>
+  <time datetime="{{rfc3339 .Now}}">{{rfc3339 .Now}}</time>
+</footer>
+</body>
+</html>

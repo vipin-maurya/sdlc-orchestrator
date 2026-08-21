@@ -14,6 +14,9 @@ A wave closes when every owner in it has landed and `gofmt -l . && go vet ./... 
 - **A1** — patch truncation is fixed properly in `execx`/`gitx`, not inferred from `len(patch) >= 4<<20`. Spec §13.3 is void. W0.2.
 - **A2** — the gate page renders live and falls back to the persisted `<gate>.md`/`<gate>.diff`, labelling on screen which one the reader has. Closes spec §13 open question 10.
 - **A3** — both diff views ship, with a toggle. Not descopable.
+- **A4** — `Server` owns its `*http.Server` and exposes `Serve(ln net.Listener) error` alongside `Start`/`Shutdown`. §2.7 pinned nothing that binds, and §5.4's `ReadHeaderTimeout: 10s` and `WriteTimeout: 0` are properties of the `http.Server` — leaving its construction to W2-M would put the timeout that would silently kill SSE in the file least likely to be reviewed for it. `Start()` still means "start the hub only", so `httptest` tests get stream events without binding. The caller must pass a listener opened on `config.NormalizeListen`'s **return value**, never the raw config string. W2-G.
+- **A5** — `/api/jobs/{id}.json` is registered as `GET /api/jobs/{idjson}`, with the `.json` suffix required and stripped and `r.SetPathValue("id", …)` called so handlers read `{id}` as on every other job route. `ServeMux` wildcards must span a whole segment: registering `{id}.json` **panics** with `bad wildcard segment (must end with '}')`. The URL spec §5.3 pins is served exactly; only the pattern spelling differs. W2-G.
+- **A6** — the root route is `GET /{$}`, not `GET /`. A bare `/` is a subtree match that would swallow every unregistered path and answer 303 where AC-8 requires 404. W2-G.
 
 ### Restated acceptance criteria
 
