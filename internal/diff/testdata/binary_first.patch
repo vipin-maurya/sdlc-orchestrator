@@ -1,0 +1,16 @@
+diff --git a/a_logo.png b/a_logo.png
+index 9956a960066c9fee1417f3ca069ec1890559ff61..8980311072f09cdda400870a74cd9294cbbab446 100644
+GIT binary patch
+literal 19
+acmeAS@N?(olH&UR@9&@FjKsY3)D!?sU<hge
+
+literal 18
+ZcmeAS@N?(olHy`uWMWRr%u6h)1OOwd1T_Ev
+
+diff --git a/z_keep.txt b/z_keep.txt
+index e0808fa..e741f6a 100644
+--- a/z_keep.txt
++++ b/z_keep.txt
+@@ -1 +1,2 @@
+ keep me
++and this

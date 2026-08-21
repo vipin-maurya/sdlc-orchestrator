@@ -61,29 +61,52 @@ observing the failure.
 
 ## Open
 
-**`internal/diff` — the correctness bugs are fixed; three items remain.**
+**Nothing outstanding in `internal/diff`.** The three items previously listed
+here were re-validated by execution and fixed; see below.
 
-1. **`File.flag` is quadratic** and its "bounded growth" comment is false — it
-   dedups only identical messages while two sites emit variable text. 829 KB of
-   crafted input takes 79.6 s and yields a 2.3 MB string. Not reachable from git
-   output, since every line between hunks is git's own; reachable by the shipped
-   fuzzer. (`diff.go:498`)
-2. **An out-of-range hunk count silently becomes 0** with no `Malformed` flag,
-   producing a deleted line with `OldNo == 0` — which `Line`'s own doc says
-   means the line does not exist on that side. (`diff.go:510`)
-3. **Surviving mutants.** The binary-payload exit (T1) still has 0% coverage:
-   `TestParseBinary`'s comment says the text file must survive the payload, but
-   the fixture orders the files so nothing follows it. Removing `Parse`'s
-   hand-back entirely (T3) also passes, because `stepHunk`'s short-hunk branch
-   is only ever reached at EOF, where `closeHunk` catches it first. Four smaller
-   mutants (T4-T8) likewise survive.
+*Closed since this was written:*
 
-*Closed since this was written:* `jobs.Submit` had no callers — `cmdSubmit`
-carried its own copy and the two had already drifted on the empty-target exit
-code and the missing-title message. The CLI now calls it, with both pinned by
-tests (`a0c54ff`). The four gate asides that rendered with visible backticks
-inside italics are fixed too: `Span` gained `Children`, so emphasis wraps inline
-code and the markdown bytes are unchanged (`ec392a9`).
+- **`File.flag` was quadratic and its "bounded growth" comment was false.**
+  Re-measured before fixing: 268 KB of distinct junk headers took **13.1s** and
+  produced **768 KB** of `Malformed`, growing 16× for every 4× of input. The
+  dedup only suppressed a message repeating verbatim, and two callers built
+  theirs from the line or the numbers they read, so the `Contains` scan walked
+  everything already recorded. `Malformed` is now capped at 1 KiB with the
+  remainder counted, and the raw line is clipped before it enters a message:
+  1.1 MB now parses in **15ms** with `Malformed` bounded at ~1 KB.
+- **An out-of-range hunk count folded to 0 in silence**, leaving a deleted line
+  with `OldNo == 0` — the value `Line`'s doc reserves for "does not exist on
+  that side". It is now flagged: `hunk header old start "999…" is not a usable
+  number`.
+- **Five surviving mutants now have fixtures**, each verified to fail with the
+  code broken and pass with it restored:
+  - T1, the binary-payload exit — `binary_literal.patch` orders the text file
+    *before* the payload, so nothing followed it and the branch had 0% coverage
+    despite a test comment claiming otherwise. `binary_first.patch` puts the
+    payload first.
+  - T3, `Parse`'s hand-back — killed by T1's fixture, not by a short-hunk one
+    (see below).
+  - T4, a blank context line whose leading space a mail client stripped.
+  - T5, a chmod *and* an edit, which was badged `StatusModeOnly` — a badge the
+    diff page renders as "the contents did not change", about a file whose
+    contents did.
+  - T6, a quoted path containing an escaped quote on a mode-only change, where
+    the `diff --git` line is the only source of the path.
+
+**T8 is an equivalent mutant, not a gap.** Widening `stripSrcPrefix` from
+`a/`/`b/` to any single letter changes no real input: git always emits `a/` and
+`b/`, `DiffPatchSince` now pins `--src-prefix`/`--dst-prefix`, and the four
+rename/copy lines no longer strip a prefix at all. No fixture can distinguish
+it, so none was written.
+
+**One correction to the original finding.** T3 claimed the short-hunk path was
+what `Parse`'s hand-back protected. It is not: with the hand-back removed,
+`short_midpatch.patch` still parses into two correct files, because the header
+state recovers on its own from the lines that follow. The hand-back is
+load-bearing for the binary payload, which is what actually fails without it.
+The short-hunk test was also asserting only that `Malformed` was non-empty,
+which passed with the branch deleted because `closeHunk` flags the same file
+with a different sentence; it now asserts that branch's own message.
 
 ---
 

@@ -48,6 +48,13 @@ type File struct {
 	// warning instead, because a patch the parser half-understood must announce
 	// itself rather than look complete.
 	Malformed string
+
+	// malformedOver latches once Malformed passes its cap, and
+	// malformedDropped counts what was refused after that. Unexported: the cap
+	// is an implementation detail of not letting a hostile patch allocate
+	// without bound, and Malformed already says so in words when it fires.
+	malformedOver    bool
+	malformedDropped int
 }
 
 type Hunk struct {
@@ -377,25 +384,37 @@ func (p *parser) openHunk(line string) {
 		if p.cur == nil {
 			p.startFile()
 		}
-		p.flag("unparsable hunk header: " + line)
+		// The line is clipped: it is attacker-shaped text, and an untruncated
+		// copy of every junk header is how Malformed grew without bound.
+		p.flag("unparsable hunk header: " + clip(line, 60))
 		return
 	}
 	if p.cur == nil {
 		p.startFile()
 	}
 	p.closeHunk()
+	// A number too big for an int used to fold to 0 silently, which left a
+	// deleted line carrying OldNo == 0 — a value Line's own doc reserves for
+	// "this line does not exist on that side". A count that does not fit is a
+	// claim the patch makes and the parser cannot honour, so it is flagged
+	// rather than quietly rewritten to something that reads as a fact.
+	num := func(field, raw string, dflt int) int {
+		if raw == "" {
+			return dflt
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			p.flag(fmt.Sprintf("hunk header %s %q is not a usable number", field, clip(raw, 24)))
+			return dflt
+		}
+		return n
+	}
 	h := Hunk{
-		OldStart: atoi(m[1]),
-		OldLines: 1,
-		NewStart: atoi(m[3]),
-		NewLines: 1,
+		OldStart: num("old start", m[1], 0),
+		OldLines: num("old count", m[2], 1),
+		NewStart: num("new start", m[3], 0),
+		NewLines: num("new count", m[4], 1),
 		Section:  strings.TrimPrefix(m[5], " "),
-	}
-	if m[2] != "" {
-		h.OldLines = atoi(m[2])
-	}
-	if m[4] != "" {
-		h.NewLines = atoi(m[4])
 	}
 	p.hunk = &h
 	p.oldRem, p.newRem = h.OldLines, h.NewLines
@@ -471,6 +490,7 @@ func (p *parser) closeFile() {
 	}
 	p.closeHunk()
 	f := p.cur
+	f.sealMalformed()
 	if f.OldPath == "" && !p.sawOldNull {
 		f.OldPath = p.hdrOld
 	}
@@ -499,19 +519,60 @@ func (p *parser) flag(msg string) {
 	p.cur.flag(msg)
 }
 
-// flag records a reconciliation failure without letting a repeated one — every
-// line of an over-long hunk body reports the same thing — grow without bound.
+// maxMalformed caps the accumulated reconciliation text. The dedup below only
+// suppresses a message that repeats verbatim, and two callers build a message
+// from the line or the numbers they read, so a patch full of distinct junk
+// headers produces a distinct message every time and the Contains scan then
+// walks everything already recorded: 268 KB of crafted input took 13s and
+// produced 768 KB of Malformed, and the capture cap is 4 MiB. Neither the time
+// nor the string is bounded by anything the parser controls, so both are
+// bounded here. Real `git diff` output cannot reach this — every line between
+// hunks is git's own — but the package ships a fuzzer that can.
+const maxMalformed = 1 << 10
+
+// flag records a reconciliation failure. A message that repeats verbatim —
+// every line of an over-long hunk body reports the same thing — is recorded
+// once, and past maxMalformed the rest are counted rather than kept: the first
+// kilobyte says what went wrong, and a reader who needs more than that needs
+// the patch, not a longer string.
 func (f *File) flag(msg string) {
+	if f.malformedOver {
+		f.malformedDropped++
+		return
+	}
 	switch {
 	case f.Malformed == "":
 		f.Malformed = msg
 	case strings.Contains(f.Malformed, msg):
+		return
 	default:
 		f.Malformed += "; " + msg
+	}
+	if len(f.Malformed) > maxMalformed {
+		f.malformedOver = true
+	}
+}
+
+// sealMalformed appends the count of messages dropped by the cap. It runs once
+// per file at close, because appending on every drop would be the unbounded
+// growth the cap exists to prevent.
+func (f *File) sealMalformed() {
+	if f.malformedDropped > 0 {
+		f.Malformed += fmt.Sprintf("; and %d further problem(s) not recorded", f.malformedDropped)
 	}
 }
 
 func isBodyByte(c byte) bool { return c == ' ' || c == '+' || c == '-' }
+
+// clip bounds a piece of patch text before it goes into a message. Without it
+// the message set is as large as the patch, which is what made Malformed
+// unbounded.
+func clip(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
+}
 
 func atoi(s string) int {
 	n, err := strconv.Atoi(s)
