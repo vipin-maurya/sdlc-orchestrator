@@ -22,6 +22,7 @@ import (
 	"github.com/vipinm/sdlc-orchestrator/internal/config"
 	"github.com/vipinm/sdlc-orchestrator/internal/engine"
 	"github.com/vipinm/sdlc-orchestrator/internal/gitx"
+	"github.com/vipinm/sdlc-orchestrator/internal/review"
 	"github.com/vipinm/sdlc-orchestrator/internal/store"
 )
 
@@ -36,6 +37,9 @@ Commands:
   submit    --target <key> --title "..." (--body "..." | --file issue.md)
   run       [--once]                 start the engine (foreground)
   status    [JOB-ID]                 list jobs / show one job in detail
+  review    [JOB-ID] [--diff] [--no-prompt]
+                                     show what a job is waiting on you to
+                                     decide; on a terminal, decide it
   approve   <JOB-ID> [--note "..."]  approve the pending merge/release gate
   reject    <JOB-ID> --reason "..." [--cancel]
   cancel    <JOB-ID>
@@ -81,6 +85,8 @@ func Main(args []string) int {
 		return cmdRun(cfg, rest)
 	case "status":
 		return cmdStatus(cfg, rest)
+	case "review":
+		return cmdReview(cfg, rest)
 	case "approve":
 		return cmdDecision(cfg, rest, "approve")
 	case "reject":
@@ -105,15 +111,24 @@ func openStore(cfg *config.Config) (*store.Store, error) {
 	return store.Open(cfg.Database.Path, cfg.Database.BusyTimeout.D())
 }
 
-// parseArgs parses flags that may appear before, after, or between positional
-// arguments. Go's flag package stops at the first non-flag token, so
+// parseArgs takes want as the exact number of positional arguments the command
+// accepts; anything beyond it is an error rather than something quietly
+// dropped, because a stray argument is a typo and dropping it is how a typo
+// stays invisible for a whole run.
+func parseArgs(fs *flag.FlagSet, args []string, want int, usage string) ([]string, error) {
+	return parseArgsRange(fs, args, want, want, usage)
+}
+
+// parseArgsRange parses flags that may appear before, after, or between
+// positional arguments. Go's flag package stops at the first non-flag token, so
 // `sdlc resume JOB-1 --to BUILDING` would otherwise leave --to unparsed and
 // silently ignored — which once resumed a job into the wrong state. Parsing
 // resumes after each positional is consumed, so both orderings behave alike.
 //
-// want is the exact number of positional arguments the command takes; anything
-// beyond it is an error rather than something quietly dropped.
-func parseArgs(fs *flag.FlagSet, args []string, want int, usage string) ([]string, error) {
+// min and max bound the positional count. They differ only for a command whose
+// argument is optional — `sdlc review [JOB-ID]` takes zero or one — so every
+// other command keeps the exact-count check it has always had.
+func parseArgsRange(fs *flag.FlagSet, args []string, min, max int, usage string) ([]string, error) {
 	var pos []string
 	for {
 		if err := fs.Parse(args); err != nil {
@@ -126,11 +141,11 @@ func parseArgs(fs *flag.FlagSet, args []string, want int, usage string) ([]strin
 		pos = append(pos, rest[0])
 		args = rest[1:]
 	}
-	if len(pos) < want {
+	if len(pos) < min {
 		return nil, fmt.Errorf("usage: %s", usage)
 	}
-	if len(pos) > want {
-		return nil, fmt.Errorf("unexpected argument(s) %s; usage: %s", strings.Join(pos[want:], " "), usage)
+	if len(pos) > max {
+		return nil, fmt.Errorf("unexpected argument(s) %s; usage: %s", strings.Join(pos[max:], " "), usage)
 	}
 	return pos, nil
 }
@@ -262,7 +277,35 @@ func cmdStatus(cfg *config.Config, args []string) int {
 			humanSince(j.StateEnteredAt), truncate(j.IssueTitle, 60))
 	}
 	w.Flush()
+	printWaiting(jobs)
 	return 0
+}
+
+// printWaiting names the jobs that have stopped for a human. The table above
+// lists states, and a state name is not a request: an operator scanning it has
+// to know which of a dozen states mean "you". Nothing is printed when nothing
+// is waiting, so an idle run keeps the output it has always had.
+func printWaiting(jobs []*store.Job) {
+	var waiting []*store.Job
+	for _, j := range jobs {
+		if review.GateFor(j.State) != "" {
+			waiting = append(waiting, j)
+		}
+	}
+	if len(waiting) == 0 {
+		return
+	}
+	fmt.Printf("\n%d job(s) waiting on you:\n", len(waiting))
+	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
+	for _, j := range waiting {
+		reason := review.GateFor(j.State) + " gate"
+		if review.GateFor(j.State) == review.GateHold {
+			reason = truncate(j.HoldReason, 60)
+		}
+		fmt.Fprintf(w, "  %s\t%s\t%s\t%s\n", j.ID, j.State, humanSince(j.StateEnteredAt), reason)
+	}
+	w.Flush()
+	fmt.Println("run `sdlc review` to read and decide them.")
 }
 
 func statusOne(cfg *config.Config, st *store.Store, id string) int {
@@ -289,6 +332,10 @@ func statusOne(cfg *config.Config, st *store.Store, id string) int {
 	fmt.Printf("  artifacts: %s\n", artifact.ArtifactsDir(cfg.Orchestrator.DataDir, j.ID))
 	printLastProgress(st, j)
 	switch j.State {
+	case engine.SAwaitSpec:
+		fmt.Println("\n  ACTION NEEDED: approve the spec and plan before any code is written")
+	case engine.SAwaitCode:
+		fmt.Println("\n  ACTION NEEDED: approve the implementation before it goes to build and test")
 	case "AWAITING_MERGE_APPROVAL":
 		fmt.Println("\n  ACTION NEEDED: review the change, then `sdlc approve " + j.ID + "` (or reject --reason)")
 		printApprovalContext(cfg, j)
@@ -296,6 +343,15 @@ func statusOne(cfg *config.Config, st *store.Store, id string) int {
 		fmt.Println("\n  ACTION NEEDED: merged. Approve release with `sdlc approve " + j.ID + "` (or reject --reason)")
 	case "ESCALATED", "TIMED_OUT":
 		fmt.Println("\n  ACTION NEEDED: inspect artifacts/logs, then `sdlc resume " + j.ID + " [--to STATE]` or `sdlc cancel " + j.ID + "`")
+	}
+	// Every gate — including the two above that print nothing else — gets the
+	// one command that shows what is actually being decided. The document is
+	// named only once the engine has written it, so the path never dangles.
+	if gate := review.GateFor(j.State); gate != "" {
+		fmt.Printf("    read it:  sdlc review %s\n", j.ID)
+		if p := review.DocPath(cfg.Orchestrator.DataDir, j.ID, gate); fileExists(p) {
+			fmt.Printf("    document: %s\n", p)
+		}
 	}
 	return 0
 }
@@ -341,14 +397,12 @@ func printApprovalContext(cfg *config.Config, j *store.Job) {
 	}
 }
 
-func gateFor(state string) string {
-	switch state {
-	case "AWAITING_MERGE_APPROVAL":
-		return "merge"
-	case "AWAITING_RELEASE_APPROVAL":
-		return "release"
-	}
-	return ""
+// recordDecision is the single place a human decision becomes an approval row.
+// cmdDecision, cmdControl, cmdResume and the `sdlc review` prompt all go
+// through it, so the engine sees one shape of row no matter which surface a
+// person used; a second writer is how the four surfaces would drift apart.
+func recordDecision(st *store.Store, a *store.Approval) error {
+	return st.AddApproval(a)
 }
 
 func cmdDecision(cfg *config.Config, args []string, decision string) int {
@@ -377,20 +431,27 @@ func cmdDecision(cfg *config.Config, args []string, decision string) int {
 		fmt.Fprintln(os.Stderr, "error: job not found:", id)
 		return 1
 	}
-	gate := gateFor(j.State)
-	if gate == "" {
+	// review.GateFor is the one state->gate mapping; a second copy here is what
+	// made `sdlc approve` blind to any gate added after it was written.
+	// GateHold is not an approval gate: a held job is cleared with
+	// resume/cancel, so approve/reject must still refuse it.
+	gate := review.GateFor(j.State)
+	if gate == "" || gate == review.GateHold {
 		fmt.Fprintf(os.Stderr, "error: %s is in state %s — there is no pending approval gate\n", id, j.State)
+		if gate == review.GateHold {
+			fmt.Fprintf(os.Stderr, "  it is held; use `sdlc resume %s` or `sdlc cancel %s`\n", id, id)
+		}
 		return 1
 	}
 	r := *reason
 	if r == "" {
 		r = *note
 	}
-	if err := st.AddApproval(&store.Approval{JobID: id, Gate: gate, Decision: decision, Reason: r, Cancel: *cancelFlag}); err != nil {
+	if err := recordDecision(st, &store.Approval{JobID: id, Gate: gate, Decision: decision, Reason: r, Cancel: *cancelFlag}); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
-	fmt.Printf("%s %s recorded for %s gate; the engine will act on its next tick\n", id, decision, gate)
+	fmt.Printf(decisionRecorded, id, decision, gate)
 	return 0
 }
 
@@ -411,7 +472,7 @@ func cmdControl(cfg *config.Config, args []string, gate string) int {
 		fmt.Fprintln(os.Stderr, "error: job not found:", id)
 		return 1
 	}
-	if err := st.AddApproval(&store.Approval{JobID: id, Gate: gate, Decision: gate}); err != nil {
+	if err := recordDecision(st, &store.Approval{JobID: id, Gate: gate, Decision: gate}); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}
@@ -443,7 +504,7 @@ func cmdResume(cfg *config.Config, args []string) int {
 		fmt.Fprintln(os.Stderr, "error: job not found:", id)
 		return 1
 	}
-	if err := st.AddApproval(&store.Approval{
+	if err := recordDecision(st, &store.Approval{
 		JobID: id, Gate: "resume", Decision: "resume", Reason: *to, Note: *note,
 	}); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)

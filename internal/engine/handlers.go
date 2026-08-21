@@ -54,12 +54,19 @@ func (c *jobCtx) handlePlanning(ctx context.Context) (string, error) {
 	pctx := c.baseCtx()
 	pctx.Round = c.job.Counters.DesignReviewRounds + 1
 	pctx.MaxRounds = c.e.cfg.Limits.MaxDesignReviewRounds
-	if c.job.Counters.DesignReviewRounds > 0 {
-		// Rework round: stage the rejected spec/plan and inline the findings.
+	rejected := c.job.Counters.HumanRejectReason
+	// A human rejection does not increment DesignReviewRounds — that counter
+	// budgets automated rework — so staging on the counter alone would send
+	// the planner back in with nothing to revise, and it would write a new
+	// spec from scratch instead of answering the objection.
+	if c.job.Counters.DesignReviewRounds > 0 || rejected != "" {
 		c.stageArtifact("spec.json")
 		c.stageArtifact("plan.json")
+	}
+	if c.job.Counters.DesignReviewRounds > 0 {
 		pctx.PrevFindings = c.findingsJSON(fmt.Sprintf("design_review.r%d.json", c.job.Counters.DesignReviewRounds))
 	}
+	pctx.RejectReason = rejected
 	err := c.runAgent(ctx, SPlanning, pctx, func() error {
 		if _, err := artifact.LoadSpec(filepath.Join(c.sdlcDir(), "spec.json")); err != nil {
 			return err
@@ -78,6 +85,11 @@ func (c *jobCtx) handlePlanning(ctx context.Context) (string, error) {
 	if _, err := c.harvest("plan.json", "plan.json"); err != nil {
 		return "", err
 	}
+	// The objection applied to this one attempt. Clearing it here — the same
+	// scoping handleFixing uses — is what stops the next re-plan, for whatever
+	// reason, from being handed a stale instruction it has already answered.
+	c.job.Counters.HumanRejectReason = ""
+	c.job.Counters.FixSource = ""
 	c.discardTreeChanges(ctx) // planner must not leave code edits behind
 	return SDesignReview, nil
 }
@@ -139,6 +151,18 @@ func (c *jobCtx) handleDesignReview(ctx context.Context) (string, error) {
 		c.e.event(c.job, "note", map[string]any{
 			"design_review_passed_with_findings": len(rev.Findings), "threshold": threshold, "artifact": name,
 		})
+	}
+	// The optional human gate sits below the LastDesignReview bookkeeping on
+	// purpose: approving into IMPLEMENTING must still forward the non-blocking
+	// findings, or the checkpoint the operator asked for becomes the place
+	// those findings quietly disappear.
+	if c.e.cfg.Policies.HumanGate("spec") {
+		c.e.event(c.job, "note", map[string]any{
+			"awaiting_spec_approval": true,
+			"design_summary":         rev.Summary,
+			"findings":               len(rev.Findings),
+		})
+		return SAwaitSpec, nil
 	}
 	return SImplementing, nil
 }
@@ -273,6 +297,16 @@ func (c *jobCtx) handleCodeReview(ctx context.Context) (string, error) {
 		}
 		c.job.Counters.FixSource = "code_review"
 		return SFixing, nil
+	}
+	// A human gate is a checkpoint on the pass path only. The blocking branch
+	// above still routes to FIXING without asking anybody: the automated
+	// verdict is not something a human is invited to override here.
+	if c.e.cfg.Policies.HumanGate("code") {
+		stat, _ := c.repo.DiffStatSince(ctx, c.job.WorktreePath, c.job.Counters.BaseSHA)
+		c.e.event(c.job, "note", map[string]any{
+			"awaiting_code_approval": true, "diff_stat": stat, "code_review_summary": rev.Summary,
+		})
+		return SAwaitCode, nil
 	}
 	return SBuilding, nil
 }

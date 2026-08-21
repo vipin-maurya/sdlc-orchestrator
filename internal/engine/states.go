@@ -18,7 +18,11 @@ const (
 	SFinalReview  = config.StFinalReview
 	// SVerifying is a configuration key, not a pipeline state: the verify
 	// pass runs inside the three review states, never as a state of its own.
-	SVerifying    = config.StVerifying
+	SVerifying = config.StVerifying
+	// The spec and code gates exist only when policies.human_gates asks for
+	// them; with the key absent the pipeline never reaches these two states.
+	SAwaitSpec    = "AWAITING_SPEC_APPROVAL"
+	SAwaitCode    = "AWAITING_CODE_APPROVAL"
 	SAwaitMerge   = "AWAITING_MERGE_APPROVAL"
 	SMerging      = "MERGING"
 	SAwaitRelease = "AWAITING_RELEASE_APPROVAL"
@@ -53,7 +57,7 @@ func isHeld(s string) bool {
 // Parked states: waiting on an approval row, no work to dispatch.
 func isParked(s string) bool {
 	switch s {
-	case SAwaitMerge, SAwaitRelease:
+	case SAwaitSpec, SAwaitCode, SAwaitMerge, SAwaitRelease:
 		return true
 	}
 	return false
