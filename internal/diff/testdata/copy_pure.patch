@@ -1,0 +1,4 @@
+diff --git a/b/orig.txt b/b/dup.txt
+similarity index 100%
+copy from b/orig.txt
+copy to b/dup.txt

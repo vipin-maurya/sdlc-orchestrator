@@ -51,6 +51,16 @@ func Split(h Hunk) []Row {
 			i++
 		}
 		adds := h.Lines[start:i]
+		// A line that is neither context nor del nor add consumes nothing, so
+		// without this the loop never advances past it and Split spins forever.
+		// Kind is a closed set and addLine only ever writes the three, so this
+		// is unreachable from Parse — but Split is exported, takes an exported
+		// struct with an exported integer field, and a hang in a request path
+		// is a denial of service. One line buys immunity.
+		if len(dels) == 0 && len(adds) == 0 {
+			i++
+			continue
+		}
 
 		n := len(dels)
 		if len(adds) > n {

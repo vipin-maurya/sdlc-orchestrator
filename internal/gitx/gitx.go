@@ -301,7 +301,12 @@ func (r Repo) DiffNamesSince(ctx context.Context, dir, sha string) ([]string, er
 // the cap and a patch that overran it are the same string.
 func (r Repo) DiffPatchSince(ctx context.Context, dir, sha string) (patch string, truncated bool, err error) {
 	res, out, err := execx.RunCapture(ctx, execx.Cmd{
-		Argv:           []string{"git", "diff", sha},
+		// The prefixes are pinned rather than left to the user's git config.
+		// internal/diff reads `diff --git a/x b/x` and strips the a/ b/; with
+		// diff.noprefix or diff.mnemonicPrefix set in ~/.gitconfig the header
+		// says something else and every path in the review comes out mangled,
+		// silently and only on that person's machine.
+		Argv:           []string{"git", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "diff", "--src-prefix=a/", "--dst-prefix=b/", sha},
 		Dir:            dir,
 		Timeout:        gitTimeout,
 		StderrSeparate: true, // reviewers read this patch; keep warnings out of it

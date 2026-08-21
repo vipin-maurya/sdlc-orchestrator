@@ -149,6 +149,12 @@ type parser struct {
 }
 
 // Parse is the whole parsing API.
+//
+// It requires git's default a/ b/ path prefixes. A patch produced with
+// diff.noprefix or diff.mnemonicPrefix set — both of which live in a user's
+// ~/.gitconfig and so vary per machine — has a different `diff --git` header,
+// and the paths come out mangled rather than refused. Callers pin the prefixes
+// on the command line for exactly this reason; see gitx.DiffPatchSince.
 func Parse(patch string) ([]*File, error) {
 	p := &parser{}
 	for _, line := range splitLines(patch) {
@@ -306,25 +312,25 @@ func (p *parser) stepHeader(line string) error {
 	case strings.HasPrefix(line, "rename from "):
 		if p.cur != nil {
 			p.cur.Status = StatusRenamed
-			p.cur.OldPath = headerPath(line[len("rename from "):])
+			p.cur.OldPath = renamePath(line[len("rename from "):])
 		}
 
 	case strings.HasPrefix(line, "rename to "):
 		if p.cur != nil {
 			p.cur.Status = StatusRenamed
-			p.cur.NewPath = headerPath(line[len("rename to "):])
+			p.cur.NewPath = renamePath(line[len("rename to "):])
 		}
 
 	case strings.HasPrefix(line, "copy from "):
 		if p.cur != nil {
 			p.cur.Status = StatusCopied
-			p.cur.OldPath = headerPath(line[len("copy from "):])
+			p.cur.OldPath = renamePath(line[len("copy from "):])
 		}
 
 	case strings.HasPrefix(line, "copy to "):
 		if p.cur != nil {
 			p.cur.Status = StatusCopied
-			p.cur.NewPath = headerPath(line[len("copy to "):])
+			p.cur.NewPath = renamePath(line[len("copy to "):])
 		}
 
 	case strings.HasPrefix(line, "index "):
@@ -558,21 +564,46 @@ func patchIsCRLF(lines []string) bool {
 	return seen
 }
 
-// headerPath turns the text after `--- `, `+++ `, `rename from ` and friends
-// into a path.
+// headerPath turns the text after `--- `, `+++ ` or `diff --git `'s halves
+// into a path. Those three carry git's a/ b/ prefix; the rename and copy lines
+// do not, and use renamePath instead.
 func headerPath(s string) string {
+	s = rawHeaderPath(s)
+	if s == devNull {
+		return devNull
+	}
+	return stripSrcPrefix(s)
+}
+
+// renamePath turns the text after `rename from `, `rename to `, `copy from `
+// or `copy to ` into a path. These four name the file directly, with no a/ b/
+// prefix, so stripping one takes a real directory off the front: a rename of
+// a/foo.txt to a/renamed.txt reported foo.txt, a path that does not exist in
+// the repository. A rename with edits hid this, because the later `--- a/...`
+// line overwrote OldPath with a correctly-prefixed one; a pure rename or copy
+// has no such line, so the wrong path was final and silent.
+func renamePath(s string) string {
+	return rawHeaderPath(s)
+}
+
+// rawHeaderPath is the part every header path shares: the TAB delimiter and
+// git's C quoting, with /dev/null mapped to the sentinel.
+func rawHeaderPath(s string) string {
 	// git appends a TAB after a path containing a space, so that a reader can
 	// tell where the name stops. A quoted path has its tabs escaped, so an
 	// unescaped one is always this separator and never part of the name.
 	if i := strings.IndexByte(s, '\t'); i >= 0 {
 		s = s[:i]
 	}
-	s = strings.TrimRight(s, " ")
+	// No TrimRight of spaces here. `foo ` is a legal POSIX filename that git
+	// does not quote, and trimming turned it into `foo`. The TAB above already
+	// ends a name that contains spaces, and splitDiffGitPaths cuts exactly at
+	// the separator, so there is nothing left for a trim to do but damage.
 	s = unquotePath(s)
 	if s == "/dev/null" {
 		return devNull
 	}
-	return stripSrcPrefix(s)
+	return s
 }
 
 // unquotePath undoes core.quotePath's C quoting. Go's string-literal syntax is
