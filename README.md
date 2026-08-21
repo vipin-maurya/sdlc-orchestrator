@@ -21,6 +21,7 @@ Runs on **Windows, macOS, and Linux**, against any repo you can describe in
 
 - **Spec:** [`docs/SPEC.md`](docs/SPEC.md) — normative; this repo implements it
 - **Operating it:** [`docs/running.md`](docs/running.md)
+- **Known gaps:** [`docs/review-findings.md`](docs/review-findings.md) — what an audit of the current build found, fixed and still open
 - **Shipping the result:** [autoship](https://github.com/vipinm/autoship), which
   the `RELEASING` state invokes
 
@@ -148,6 +149,7 @@ prompts/              embedded default per-state prompts
 scripts/              supervisor install scripts (Task Scheduler / launchd / systemd)
 docs/SPEC.md          the specification this repo implements
 docs/running.md       installing, validating, and running it unattended
+docs/review-findings.md  audit of the current build: fixed, open, and verified
 ```
 
 ## Three things worth knowing before changing it
