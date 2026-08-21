@@ -109,6 +109,14 @@ AWAITING_RELEASE_APPROVAL → RELEASING → COMPLETED`
 Off-nominal states: `FLAKE_CHECK`, `ANALYZING`, `FIXING`,
 `BLOCKED_ON_QUOTA`, `ESCALATED`, `CANCELLED`, `TIMED_OUT`, `FAILED`.
 
+Optional gate states: `AWAITING_SPEC_APPROVAL` (between DESIGN_REVIEW and
+IMPLEMENTING) and `AWAITING_CODE_APPROVAL` (between CODE_REVIEW and
+BUILDING). They exist only when `policies.human_gates` lists `spec` /
+`code`; at that key's empty default the pipeline never enters them. A job
+parked in one of them on a binary that no longer knows the state is
+escalated with `no handler for state ...` — a hold with a reason, not a
+crash.
+
 Terminal states: `COMPLETED`, `CANCELLED`, `FAILED`.
 `ESCALATED` and `TIMED_OUT` are durable holds: a human can `sdlc resume`
 (re-enter a configured state) or `sdlc cancel`.
@@ -123,10 +131,14 @@ Terminal states: `COMPLETED`, `CANCELLED`, `FAILED`.
 | DESIGN_REVIEW | no finding at or above `policies.design_review_blocks_at`; any lesser findings forwarded to IMPLEMENTING | IMPLEMENTING |
 | DESIGN_REVIEW | blocking findings present, rounds < `limits.max_design_review_rounds` | PLANNING |
 | DESIGN_REVIEW | blocking findings present, rounds exhausted | ESCALATED |
+| AWAITING_SPEC_APPROVAL | `sdlc approve` | IMPLEMENTING |
+| AWAITING_SPEC_APPROVAL | `sdlc reject` | PLANNING (reason attached) or CANCELLED (`--cancel`) |
 | IMPLEMENTING | non-empty diff + implementation.json valid + every plan step accounted for; orchestrator commits | CODE_REVIEW |
 | CODE_REVIEW | no finding at or above `policies.code_review_blocks_at` | BUILDING |
 | CODE_REVIEW | blocking findings, rounds < `limits.max_code_review_rounds` | FIXING |
 | CODE_REVIEW | rounds exhausted | ESCALATED |
+| AWAITING_CODE_APPROVAL | `sdlc approve` | BUILDING |
+| AWAITING_CODE_APPROVAL | `sdlc reject` | FIXING (reason attached) or CANCELLED (`--cancel`) |
 | BUILDING | all build commands exit 0 | TESTING |
 | BUILDING | build fails | ANALYZING |
 | TESTING | unit (and enabled UI) tests pass | FINAL_REVIEW |
@@ -174,6 +186,18 @@ Notes (normative):
   threshold still describes a real problem in work nobody will revisit:
   design-review findings are staged and inlined into the IMPLEMENTING prompt,
   and final-review findings ride along on the merge-approval event.
+- **The optional human gates sit on the pass path only.** With
+  `policies.human_gates: [spec]` the DESIGN_REVIEW → IMPLEMENTING row parks
+  at AWAITING_SPEC_APPROVAL first; with `[code]` the CODE_REVIEW → BUILDING
+  row parks at AWAITING_CODE_APPROVAL. The blocking branches are unchanged —
+  a human gate is a checkpoint on a passing verdict, never a substitute for
+  one. Merge and release are always enforced and need not be listed.
+- **A human rejection spends no review-round budget.**
+  `design_review_rounds` and `code_review_rounds` count *automated* rounds
+  and gate the `max_*_rounds` escalation; charging a human "no" to them
+  would turn two of them into an ESCALATED job. The human loop is bounded by
+  `limits.max_job_duration` and `limits.max_agent_invocations_per_job`
+  instead.
 - **AWAITING_* states are durable.** The engine parks them; restart-safe;
   approval arrives via the DB from a separate `sdlc approve` invocation.
 - BLOCKED_ON_QUOTA does **not** consume retry/fix budgets.
@@ -708,6 +732,12 @@ sdlc run     [--once]         start the engine (foreground; lock-file guarded).
                               --once drains runnable work then exits; default
                               runs until Ctrl-C.
 sdlc status  [job]            table of jobs / detail incl. counters, waits
+sdlc review  [job] [--diff] [--no-prompt]
+                              print what the job is waiting on you to decide;
+                              on a terminal, prompt for the decision. Prints
+                              and exits when stdin is not a terminal (pipe,
+                              cron, CI) or with --no-prompt. With no job id,
+                              walks every job waiting on a human.
 sdlc approve <job> [--note]   consume current AWAITING_* gate
 sdlc reject  <job> --reason "..." [--cancel]
 sdlc cancel  <job>
@@ -757,6 +787,7 @@ orchestrator:
   lock_file: ${data_dir}/engine.lock   # single-engine enforcement
   stream_output: true           # echo each agent action to the console (§6.1)
   heartbeat_interval: 60s       # "still running" line + event; 0 disables
+  gate_reminder_interval: 10m   # re-announce open gates this often; 0 = once
 
 database:
   path: ${data_dir}/sdlc.db
@@ -870,6 +901,8 @@ policies:
   design_review_blocks_at: major        # blocker | major | minor | nit — lowest severity
   code_review_blocks_at: blocker        # that stops the pipeline at each review gate.
   final_review_blocks_at: blocker       # Default blocker; lesser findings are forwarded, not dropped.
+  human_gates: []                       # optional earlier stops: spec | code;
+                                        # merge and release always enforced
   protect_tests_on_code_bug_fix: true   # FIXING diff may not touch test files when classification=code_bug
   test_file_globs:
     - "**/src/test/**"

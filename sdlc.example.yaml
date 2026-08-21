@@ -19,6 +19,9 @@ orchestrator:
   # being written.
   stream_output: true           # echo agent actions to the engine console
   heartbeat_interval: 60s       # 0 disables the "still running" line
+  # An open gate waits on a person, so the console has to keep saying so: the
+  # engine announces it when the job parks and re-announces it this often.
+  gate_reminder_interval: 10m   # 0 announces each gate once and never repeats
 
 # database:
 #   path: <data_dir>/sdlc.db
@@ -134,6 +137,10 @@ policies:
   design_review_blocks_at: major
   code_review_blocks_at: blocker
   final_review_blocks_at: blocker
+  # Optional earlier stops: `spec` after design review passes and before any
+  # code is written, `code` after code review passes and before build and
+  # test. Merge and release are always enforced; this key only adds stops.
+  # human_gates: [spec, code]
   protect_tests_on_code_bug_fix: true   # FIXING may not touch tests when the failure was a code bug
   test_file_globs:
     - "**/src/test/**"

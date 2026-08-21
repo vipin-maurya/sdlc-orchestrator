@@ -247,6 +247,8 @@ with a reason attached, and every one of them is cleared by hand:
 
 | State | What happened | How it clears |
 |---|---|---|
+| `AWAITING_SPEC_APPROVAL` | The spec and plan passed design review, and `policies.human_gates` lists `spec` | `sdlc review JOB-1`, or `sdlc approve JOB-1` / `sdlc reject JOB-1 --reason "..."` |
+| `AWAITING_CODE_APPROVAL` | The implementation passed code review, and `policies.human_gates` lists `code` | `sdlc review JOB-1`, or `sdlc approve JOB-1` / `sdlc reject JOB-1 --reason "..."` |
 | `AWAITING_MERGE_APPROVAL` / `AWAITING_RELEASE_APPROVAL` | Human gate | `sdlc approve JOB-1` / `sdlc reject JOB-1 --reason "..."` |
 | `ESCALATED` | A round cap, retry cap, invocation budget or policy violation | `sdlc resume JOB-1` (optionally `--to STATE`) |
 | `TIMED_OUT` | `limits.max_job_duration` or a per-state timeout | `sdlc resume JOB-1` |
@@ -255,6 +257,15 @@ with a reason attached, and every one of them is cleared by hand:
 `BLOCKED_ON_QUOTA` is deliberately not a failure: a rate-limited run suspends
 the job instead of burning a retry budget. Start with `sdlc status JOB-1` for
 the reason and the pending action, then `sdlc events JOB-1` for the full trail.
+
+You do not have to go looking for a stopped job in the first place. The run
+console announces a gate the moment a job parks on it — what is being decided,
+how long it has waited, and the path to the gate document the engine wrote —
+and re-announces it every `orchestrator.gate_reminder_interval` (10m by
+default; `0` announces once and never repeats) for as long as it stays open.
+`sdlc review JOB-1` prints that document in full and, on a terminal, prompts
+for the decision; with no job id it walks every job waiting on a human, so one
+command clears the queue that built up overnight.
 
 Whatever the stopped state had done is on the branch, not lost in a dirty
 worktree: IMPLEMENTING and FIXING commit each step the agent reports finishing
