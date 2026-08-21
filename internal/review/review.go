@@ -69,6 +69,10 @@ type Doc struct {
 	Title string
 	// Body is markdown: readable in a terminal, and openable as a file.
 	Body string
+	// Blocks is the document as a tree. Body is rendered from it rather than
+	// built alongside it, so the browser and the terminal cannot come to
+	// describe the same gate differently.
+	Blocks []Block
 	// Diff is the full patch when one was produced ("" otherwise). It is kept
 	// out of Body so the caller can write it to its own file.
 	Diff string
@@ -140,7 +144,15 @@ func Write(ctx context.Context, o Options) (*Doc, string, error) {
 		if err := os.WriteFile(diffPath, []byte(doc.Diff), 0o644); err != nil {
 			return nil, "", err
 		}
-		doc.Body += fmt.Sprintf("\nFull patch: `%s`\n", diffPath)
+		// A block and a re-render, not a string concatenation: Body is a
+		// function of Blocks everywhere else, and a line appended to one but
+		// not the other is the browser and the terminal disagreeing about
+		// whether the patch is on disk.
+		doc.Blocks = append(doc.Blocks, Block{Kind: BlockParagraph, Spans: []Span{
+			{Kind: SpanText, Text: "\nFull patch: "},
+			{Kind: SpanPath, Text: diffPath},
+		}})
+		doc.Body = renderMarkdown(doc.Blocks)
 	}
 	docPath := DocPath(o.DataDir, o.Job.ID, doc.Gate)
 	if err := os.WriteFile(docPath, []byte(doc.Body), 0o644); err != nil {
@@ -165,48 +177,57 @@ func Render(ctx context.Context, o Options) (*Doc, error) {
 		return nil, fmt.Errorf("%s is in state %s — nothing is waiting on you", o.Job.ID, o.Job.State)
 	}
 	d := &Doc{Gate: gate}
-	var b strings.Builder
 	art := artifact.ArtifactsDir(o.DataDir, o.Job.ID)
 
 	d.Title = gateTitle(gate, o)
-	fmt.Fprintf(&b, "# %s — %s\n\n", o.Job.ID, o.Job.IssueTitle)
-	fmt.Fprintf(&b, "**%s**\n\n", d.Title)
-	fmt.Fprintf(&b, "- state: `%s` (waiting %s)\n", o.Job.State, humanSince(o.Job.StateEnteredAt))
-	fmt.Fprintf(&b, "- branch: `%s`\n", o.Job.Branch)
-	fmt.Fprintf(&b, "- worktree: `%s`\n", o.Job.WorktreePath)
-	fmt.Fprintf(&b, "- artifacts: `%s`\n", art)
-	b.WriteString("\n")
+	d.Blocks = append(d.Blocks,
+		Block{Kind: BlockHeading, Level: 1, Text: fmt.Sprintf("%s — %s", o.Job.ID, o.Job.IssueTitle)},
+		para(Span{Kind: SpanStrong, Text: d.Title}),
+		Block{Kind: BlockFacts, Facts: []Fact{
+			{Label: "state", Value: o.Job.State, Note: "waiting " + humanSince(o.Job.StateEnteredAt)},
+			{Label: "branch", Value: o.Job.Branch},
+			{Label: "worktree", Value: o.Job.WorktreePath},
+			{Label: "artifacts", Value: art},
+		}},
+	)
 
 	switch gate {
 	case GateSpec:
-		renderIssue(&b, o.Job)
-		renderSpec(&b, art)
-		renderPlan(&b, art)
-		d.Findings += renderReview(&b, art, latestReview(art, "design_review"), "Design review")
+		renderIssue(&d.Blocks, o.Job)
+		renderSpec(&d.Blocks, art)
+		renderPlan(&d.Blocks, art)
+		d.Findings += renderReview(&d.Blocks, art, latestReview(art, "design_review"), "Design review")
 	case GateCode:
-		renderImplementation(&b, art, "implementation.json", "Implementation")
-		d.Findings += renderReview(&b, art, latestReview(art, "code_review"), "Code review")
-		renderDiff(ctx, &b, d, o)
+		renderImplementation(&d.Blocks, art, "implementation.json", "Implementation")
+		d.Findings += renderReview(&d.Blocks, art, latestReview(art, "code_review"), "Code review")
+		renderDiff(ctx, &d.Blocks, d, o)
 	case GateMerge:
-		renderImplementation(&b, art, "implementation.json", "Implementation")
-		d.Findings += renderReview(&b, art, preferVerified(art, "final_review.json"), "Final review")
-		renderDiff(ctx, &b, d, o)
+		renderImplementation(&d.Blocks, art, "implementation.json", "Implementation")
+		d.Findings += renderReview(&d.Blocks, art, preferVerified(art, "final_review.json"), "Final review")
+		renderDiff(ctx, &d.Blocks, d, o)
 	case GateRelease:
-		fmt.Fprintf(&b, "## Merged\n\n`%s` is merged into `%s`. Approving runs the release command:\n\n",
-			o.Job.Branch, orDash(o.DefaultBranch))
+		d.Blocks = append(d.Blocks,
+			section("Merged"),
+			para(
+				Span{Kind: SpanCode, Text: o.Job.Branch},
+				Span{Kind: SpanText, Text: " is merged into "},
+				Span{Kind: SpanCode, Text: orDash(o.DefaultBranch)},
+				Span{Kind: SpanText, Text: ". Approving runs the release command:"},
+			),
+		)
 		if len(o.ShipCommand) > 0 {
-			fmt.Fprintf(&b, "```\n%s\n```\n\n", strings.Join(o.ShipCommand, " "))
+			d.Blocks = append(d.Blocks, Block{Kind: BlockCode, Text: strings.Join(o.ShipCommand, " ")})
 		} else {
-			b.WriteString("_No `ship.command` is configured for this target; the release state will fail._\n\n")
+			d.Blocks = append(d.Blocks, aside("No `ship.command` is configured for this target; the release state will fail."))
 		}
-		renderImplementation(&b, art, "implementation.json", "What was merged")
+		renderImplementation(&d.Blocks, art, "implementation.json", "What was merged")
 	case GateHold:
-		renderHold(&b, o)
-		renderDiff(ctx, &b, d, o)
+		renderHold(&d.Blocks, o)
+		renderDiff(ctx, &d.Blocks, d, o)
 	}
 
-	renderActions(&b, gate, o)
-	d.Body = b.String()
+	renderActions(&d.Blocks, gate, o)
+	d.Body = renderMarkdown(d.Blocks)
 	return d, nil
 }
 
@@ -226,72 +247,76 @@ func gateTitle(gate string, o Options) string {
 	return "Decision needed."
 }
 
-func renderIssue(b *strings.Builder, j *store.Job) {
-	b.WriteString("## Issue\n\n")
+func renderIssue(bs *[]Block, j *store.Job) {
 	body := strings.TrimSpace(j.IssueBody)
 	if body == "" {
 		body = "_(no body)_"
 	}
-	b.WriteString(quote(body, 40))
-	b.WriteString("\n")
+	text, truncated := clipLines(body, 40)
+	*bs = append(*bs,
+		section("Issue"),
+		Block{Kind: BlockQuote, Text: text, Truncated: truncated},
+	)
 }
 
-func renderSpec(b *strings.Builder, art string) {
+func renderSpec(bs *[]Block, art string) {
 	s, err := artifact.LoadSpec(filepath.Join(art, "spec.json"))
 	if err != nil {
-		fmt.Fprintf(b, "## Spec\n\n_unavailable: %v_\n\n", err)
+		*bs = append(*bs, section("Spec"), aside(fmt.Sprintf("unavailable: %v", err)))
 		return
 	}
-	b.WriteString("## Spec\n\n")
-	fmt.Fprintf(b, "%s\n\n", s.IssueSummary)
-	fmt.Fprintf(b, "**Approach.** %s\n\n", s.Approach)
-	bullets(b, "Acceptance criteria", s.AcceptanceCriteria)
-	bullets(b, "Files it expects to touch", s.AffectedFiles)
-	bullets(b, "Error paths", s.ErrorPaths)
-	bullets(b, "Out of scope", s.OutOfScope)
-	bullets(b, "Compatibility concerns", s.CompatibilityConcerns)
+	*bs = append(*bs,
+		section("Spec"),
+		para(Span{Kind: SpanText, Text: s.IssueSummary}),
+		para(
+			Span{Kind: SpanStrong, Text: "Approach."},
+			Span{Kind: SpanText, Text: " " + s.Approach},
+		),
+	)
+	bullets(bs, "Acceptance criteria", s.AcceptanceCriteria)
+	bullets(bs, "Files it expects to touch", s.AffectedFiles)
+	bullets(bs, "Error paths", s.ErrorPaths)
+	bullets(bs, "Out of scope", s.OutOfScope)
+	bullets(bs, "Compatibility concerns", s.CompatibilityConcerns)
 }
 
-func renderPlan(b *strings.Builder, art string) {
+func renderPlan(bs *[]Block, art string) {
 	p, err := artifact.LoadPlan(filepath.Join(art, "plan.json"))
 	if err != nil {
-		fmt.Fprintf(b, "## Plan\n\n_unavailable: %v_\n\n", err)
+		*bs = append(*bs, section("Plan"), aside(fmt.Sprintf("unavailable: %v", err)))
 		return
 	}
-	fmt.Fprintf(b, "## Plan (%d steps)\n\n", len(p.Steps))
-	for _, s := range p.Steps {
-		fmt.Fprintf(b, "- **%s** %s\n", s.ID, s.Description)
-		if len(s.Files) > 0 {
-			fmt.Fprintf(b, "  - files: %s\n", strings.Join(s.Files, ", "))
-		}
-		if s.Verification != "" {
-			fmt.Fprintf(b, "  - verify: %s\n", s.Verification)
-		}
-	}
-	b.WriteString("\n")
-	bullets(b, "Risks", p.Risks)
+	*bs = append(*bs,
+		section(fmt.Sprintf("Plan (%d steps)", len(p.Steps))),
+		// The steps travel as artifact.PlanStep rather than as formatted
+		// lines: the browser wants to lay out the files and the verification
+		// command differently from the terminal, and it can only do that from
+		// the fields.
+		Block{Kind: BlockSteps, Steps: p.Steps},
+	)
+	bullets(bs, "Risks", p.Risks)
 }
 
-func renderImplementation(b *strings.Builder, art, name, heading string) {
+func renderImplementation(bs *[]Block, art, name, heading string) {
 	im, err := artifact.LoadImplementation(filepath.Join(art, name))
 	if err != nil {
 		return
 	}
-	fmt.Fprintf(b, "## %s\n\n%s\n\n", heading, im.Summary)
-	bullets(b, "Files changed", im.FilesChanged)
-	bullets(b, "Tests added or changed", im.TestsAddedOrChanged)
+	*bs = append(*bs, section(heading), para(Span{Kind: SpanText, Text: im.Summary}))
+	bullets(bs, "Files changed", im.FilesChanged)
+	bullets(bs, "Tests added or changed", im.TestsAddedOrChanged)
 	var skipped []string
 	for _, s := range im.SkippedSteps() {
 		skipped = append(skipped, fmt.Sprintf("%s — %s", s.ID, s.Note))
 	}
-	bullets(b, "Plan steps NOT done", skipped)
+	bullets(bs, "Plan steps NOT done", skipped)
 }
 
 // renderReview prints a review artifact's summary and every finding. Findings
 // below the gate threshold are the reason this exists: the pipeline let the
 // job through because nothing blocked, but "nothing blocked" is not "nothing
 // was found", and the approver is the last reader either way.
-func renderReview(b *strings.Builder, art, name, heading string) int {
+func renderReview(bs *[]Block, art, name, heading string) int {
 	if name == "" {
 		return 0
 	}
@@ -299,40 +324,31 @@ func renderReview(b *strings.Builder, art, name, heading string) int {
 	if err != nil {
 		return 0
 	}
-	fmt.Fprintf(b, "## %s\n\n%s\n\n", heading, r.Summary)
-	fmt.Fprintf(b, "_source: `%s`_\n\n", name)
+	*bs = append(*bs,
+		section(heading),
+		para(Span{Kind: SpanText, Text: r.Summary}),
+		aside("source: `"+name+"`"),
+	)
 	if len(r.Findings) == 0 {
-		b.WriteString("No findings.\n\n")
+		*bs = append(*bs, para(Span{Kind: SpanText, Text: "No findings."}))
 		return 0
 	}
-	for _, f := range r.Findings {
-		loc := ""
-		if f.File != "" {
-			loc = " `" + f.File + "`"
-		}
-		fmt.Fprintf(b, "- **[%s]**%s %s\n", f.Severity, loc, f.Description)
-		if f.Recommendation != "" {
-			fmt.Fprintf(b, "  - recommendation: %s\n", f.Recommendation)
-		}
-		if v := f.Verification; v != nil {
-			verdict := "refuted"
-			if v.Survived {
-				verdict = "confirmed"
-			}
-			fmt.Fprintf(b, "  - verifiers: %s %d/%d (was %s)\n", verdict, v.Confirmed, v.Votes, v.OriginalSeverity)
-		}
-	}
-	b.WriteString("\n")
+	// The findings go across whole, not pre-formatted. The severity badge and
+	// the verification verdict are the two things each surface draws in its
+	// own idiom, and formatting them into a string here is what would force
+	// the browser to un-format them again.
+	*bs = append(*bs, Block{Kind: BlockFindings, Findings: r.Findings})
 	return len(r.Findings)
 }
 
-func renderDiff(ctx context.Context, b *strings.Builder, d *Doc, o Options) {
+func renderDiff(ctx context.Context, bs *[]Block, d *Doc, o Options) {
 	base := o.Job.Counters.BaseSHA
 	if base == "" {
 		return
 	}
 	if _, err := os.Stat(o.Job.WorktreePath); err != nil {
-		fmt.Fprintf(b, "## Diff\n\n_worktree %s is gone; nothing to diff_\n\n", o.Job.WorktreePath)
+		*bs = append(*bs, section("Diff"),
+			aside(fmt.Sprintf("worktree %s is gone; nothing to diff", o.Job.WorktreePath)))
 		return
 	}
 	repo := gitx.Repo{Root: o.RepoPath}
@@ -340,80 +356,108 @@ func renderDiff(ctx context.Context, b *strings.Builder, d *Doc, o Options) {
 	defer cancel()
 	stat, err := repo.DiffStatSince(dctx, o.Job.WorktreePath, base)
 	if err != nil {
-		fmt.Fprintf(b, "## Diff\n\n_unavailable: %v_\n\n", err)
+		*bs = append(*bs, section("Diff"), aside(fmt.Sprintf("unavailable: %v", err)))
 		return
 	}
-	b.WriteString("## Diff vs base\n\n")
-	fmt.Fprintf(b, "```\n%s\n```\n\n", strings.TrimRight(stat, "\n"))
+	*bs = append(*bs,
+		section("Diff vs base"),
+		Block{Kind: BlockCode, Text: strings.TrimRight(stat, "\n")},
+	)
 	patch, truncated, err := repo.DiffPatchSince(dctx, o.Job.WorktreePath, base)
 	if err == nil {
 		d.Diff, d.DiffTruncated = patch, truncated
 		if truncated {
-			fmt.Fprintf(b, "_The patch exceeds the 4 MiB capture limit; what follows is its head. `git -C %s diff %s` for all of it._\n\n",
-				o.Job.WorktreePath, short(base))
+			*bs = append(*bs, aside(fmt.Sprintf(
+				"The patch exceeds the 4 MiB capture limit; what follows is its head. `git -C %s diff %s` for all of it.",
+				o.Job.WorktreePath, short(base))))
 		}
 		if o.FullDiff {
-			fmt.Fprintf(b, "```diff\n%s\n```\n\n", strings.TrimRight(patch, "\n"))
+			*bs = append(*bs, Block{Kind: BlockCode, Lang: "diff", Text: strings.TrimRight(patch, "\n")})
 		} else {
 			// No path to the patch file here: Render does not write it, and only
 			// Write knows it is on disk. Naming it from here would point a reader
 			// at a file that exists only when the engine happened to park this
 			// job — the git command works either way.
-			fmt.Fprintf(b, "_Re-run with `--diff` to read it inline, or `git -C %s diff %s`._\n\n",
-				o.Job.WorktreePath, short(base))
+			*bs = append(*bs, aside(fmt.Sprintf("Re-run with `--diff` to read it inline, or `git -C %s diff %s`.",
+				o.Job.WorktreePath, short(base))))
 		}
 	}
 }
 
-func renderHold(b *strings.Builder, o Options) {
-	fmt.Fprintf(b, "## Why it stopped\n\n%s\n\n", orDash(o.Job.HoldReason))
+func renderHold(bs *[]Block, o Options) {
+	*bs = append(*bs, section("Why it stopped"), para(Span{Kind: SpanText, Text: orDash(o.Job.HoldReason)}))
 	if len(o.Events) == 0 {
 		return
 	}
-	b.WriteString("## Last events\n\n```\n")
 	evs := o.Events
 	if len(evs) > 12 {
 		evs = evs[len(evs)-12:]
 	}
+	lines := make([]string, 0, len(evs))
 	for _, e := range evs {
-		fmt.Fprintf(b, "%s  %-18s %-12s %s\n",
-			e.CreatedAt.Local().Format("15:04:05"), e.State, e.Kind, oneLine(e.Detail, 90))
+		// The padding is what makes the columns line up, so a short field
+		// leaves trailing spaces on the line. They are part of the document
+		// and nothing downstream may trim them.
+		lines = append(lines, fmt.Sprintf("%s  %-18s %-12s %s",
+			e.CreatedAt.Local().Format("15:04:05"), e.State, e.Kind, oneLine(e.Detail, 90)))
 	}
-	b.WriteString("```\n\n")
+	*bs = append(*bs, section("Last events"), Block{Kind: BlockCode, Text: strings.Join(lines, "\n")})
 }
 
 // renderActions is the part that must never be missing: a document that shows
 // the change but not how to accept or refuse it leaves the operator exactly
 // where they started.
-func renderActions(b *strings.Builder, gate string, o Options) {
+func renderActions(bs *[]Block, gate string, o Options) {
 	id := o.Job.ID
-	b.WriteString("## What happens next\n\n")
+	blk := Block{Kind: BlockActions}
+	text := func(s string) []Span { return []Span{{Kind: SpanText, Text: s}} }
 	switch gate {
 	case GateSpec:
-		fmt.Fprintf(b, "- approve → implementation starts from this plan\n")
-		fmt.Fprintf(b, "- reject → planning runs again with your reason as its instruction\n\n")
+		blk.Actions = []Action{
+			{Decision: "approve", Effect: text("implementation starts from this plan")},
+			{Decision: "reject", Effect: text("planning runs again with your reason as its instruction")},
+		}
 	case GateCode:
-		fmt.Fprintf(b, "- approve → the change goes to build and test\n")
-		fmt.Fprintf(b, "- reject → a fix round starts with your reason as its instruction\n\n")
+		blk.Actions = []Action{
+			{Decision: "approve", Effect: text("the change goes to build and test")},
+			{Decision: "reject", Effect: text("a fix round starts with your reason as its instruction")},
+		}
 	case GateMerge:
-		fmt.Fprintf(b, "- approve → merged into `%s` (no fast-forward)\n", orDash(o.DefaultBranch))
-		fmt.Fprintf(b, "- reject → a fix round starts with your reason; `--cancel` ends the job instead\n\n")
+		blk.Actions = []Action{
+			{Decision: "approve", Effect: []Span{
+				{Kind: SpanText, Text: "merged into "},
+				{Kind: SpanCode, Text: orDash(o.DefaultBranch)},
+				{Kind: SpanText, Text: " (no fast-forward)"},
+			}},
+			{Decision: "reject", Effect: []Span{
+				{Kind: SpanText, Text: "a fix round starts with your reason; "},
+				{Kind: SpanCode, Text: "--cancel"},
+				{Kind: SpanText, Text: " ends the job instead"},
+			}},
+		}
 	case GateRelease:
-		fmt.Fprintf(b, "- approve → the release command runs\n")
-		fmt.Fprintf(b, "- reject → the job completes without releasing (the merge stands)\n\n")
+		blk.Actions = []Action{
+			{Decision: "approve", Effect: text("the release command runs")},
+			{Decision: "reject", Effect: text("the job completes without releasing (the merge stands)")},
+		}
 	case GateHold:
-		b.WriteString("- resume → the job re-enters the state it stopped in, or the one you name\n")
-		b.WriteString("- cancel → the job ends and its worktree is cleaned up\n\n")
+		blk.Actions = []Action{
+			{Decision: "resume", Effect: text("the job re-enters the state it stopped in, or the one you name")},
+			{Decision: "cancel", Effect: text("the job ends and its worktree is cleaned up")},
+		}
 	}
-	b.WriteString("```\n")
 	if gate == GateHold {
-		fmt.Fprintf(b, "sdlc resume %s [--to STATE] [--note \"do X instead\"]\n", id)
-		fmt.Fprintf(b, "sdlc cancel %s\n", id)
+		blk.Commands = []string{
+			fmt.Sprintf("sdlc resume %s [--to STATE] [--note \"do X instead\"]", id),
+			fmt.Sprintf("sdlc cancel %s", id),
+		}
 	} else {
-		fmt.Fprintf(b, "sdlc approve %s [--note \"...\"]\n", id)
-		fmt.Fprintf(b, "sdlc reject  %s --reason \"...\"\n", id)
+		blk.Commands = []string{
+			fmt.Sprintf("sdlc approve %s [--note \"...\"]", id),
+			fmt.Sprintf("sdlc reject  %s --reason \"...\"", id),
+		}
 	}
-	b.WriteString("```\n")
+	*bs = append(*bs, section("What happens next"), blk)
 }
 
 // --- helpers -------------------------------------------------------------
@@ -468,32 +512,50 @@ func preferVerified(art, name string) string {
 	return name
 }
 
-func bullets(b *strings.Builder, heading string, items []string) {
+// section is a level-2 heading, which is every heading the document has below
+// its title.
+func section(text string) Block {
+	return Block{Kind: BlockHeading, Level: 2, Text: text}
+}
+
+// aside is one of the document's italic remarks — "unavailable: ...", "the
+// worktree is gone", "re-run with --diff". They are emphasis rather than plain
+// text because each one is the renderer speaking about the document rather
+// than the document's own content.
+//
+// The text may carry backticks of its own, as several of these do. Spans do
+// not nest, so an aside that quotes a command is one emphasis span containing
+// the backticks rather than an emphasis wrapped around a code span; markdown
+// reads it correctly either way, and a renderer that cannot nest is better
+// than a document that changes.
+func aside(text string) Block {
+	return para(Span{Kind: SpanEmphasis, Text: text})
+}
+
+func bullets(bs *[]Block, heading string, items []string) {
 	if len(items) == 0 {
 		return
 	}
-	fmt.Fprintf(b, "**%s.**\n\n", heading)
+	list := Block{Kind: BlockBullets, Items: make([]Item, 0, len(items))}
 	for _, it := range items {
-		fmt.Fprintf(b, "- %s\n", it)
+		list.Items = append(list.Items, Item{Spans: []Span{{Kind: SpanText, Text: it}}})
 	}
-	b.WriteString("\n")
+	*bs = append(*bs,
+		para(Span{Kind: SpanStrong, Text: heading + "."}),
+		list,
+	)
 }
 
-func quote(s string, maxLines int) string {
+// clipLines cuts s to maxLines and reports whether anything was dropped. The
+// caller keeps the flag on the block rather than appending a marker to the
+// text, so the truncation is a fact both surfaces can present in their own
+// way instead of a sentence one of them has to parse back out.
+func clipLines(s string, maxLines int) (string, bool) {
 	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	truncated := false
-	if len(lines) > maxLines {
-		lines = lines[:maxLines]
-		truncated = true
+	if len(lines) <= maxLines {
+		return strings.Join(lines, "\n"), false
 	}
-	for i, ln := range lines {
-		lines[i] = "> " + ln
-	}
-	out := strings.Join(lines, "\n") + "\n"
-	if truncated {
-		out += ">\n> _(truncated)_\n"
-	}
-	return out
+	return strings.Join(lines[:maxLines], "\n"), true
 }
 
 func oneLine(s string, n int) string {
