@@ -291,6 +291,10 @@ type spanView struct {
 	Kind    review.SpanKind
 	Text    string
 	Handled bool
+	// Children is set for a span that wraps others — emphasis around inline
+	// code, which is how the asides that quote a command are built. When it is
+	// set, Text is empty and the template recurses instead of printing it.
+	Children []spanView
 }
 
 // blockViews shapes a whole document. An unhandled kind becomes a view that
@@ -421,6 +425,13 @@ func newSpanView(s review.Span) spanView {
 	case review.SpanText, review.SpanStrong, review.SpanEmphasis, review.SpanCode, review.SpanPath:
 	default:
 		v.Handled = false
+	}
+	// A wrapping span carries no text of its own. Shaping the children here
+	// rather than in the template keeps the Handled flag meaningful all the way
+	// down: an unrenderable child says so where it sits, instead of the whole
+	// aside vanishing.
+	for _, c := range s.Children {
+		v.Children = append(v.Children, newSpanView(c))
 	}
 	return v
 }

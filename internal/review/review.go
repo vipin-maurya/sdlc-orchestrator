@@ -249,7 +249,7 @@ func Render(ctx context.Context, o Options) (*Doc, error) {
 		if len(o.ShipCommand) > 0 {
 			d.Blocks = append(d.Blocks, Block{Kind: BlockCode, Text: strings.Join(o.ShipCommand, " ")})
 		} else {
-			d.Blocks = append(d.Blocks, aside("No `ship.command` is configured for this target; the release state will fail."))
+			d.Blocks = append(d.Blocks, asideOf(txt("No "), code("ship.command"), txt(" is configured for this target; the release state will fail.")))
 		}
 		renderImplementation(&d.Blocks, art, "implementation.json", "What was merged")
 	case GateHold:
@@ -358,7 +358,7 @@ func renderReview(bs *[]Block, art, name, heading string) int {
 	*bs = append(*bs,
 		section(heading),
 		para(Span{Kind: SpanText, Text: r.Summary}),
-		aside("source: `"+name+"`"),
+		asideOf(txt("source: "), code(name)),
 	)
 	if len(r.Findings) == 0 {
 		*bs = append(*bs, para(Span{Kind: SpanText, Text: "No findings."}))
@@ -419,9 +419,10 @@ func renderDiff(ctx context.Context, bs *[]Block, d *Doc, o Options) {
 			// it never printed. What is true either way is that the capture
 			// stopped short, which is also what the reader needs in order to
 			// distrust the .diff file Write puts on disk.
-			*bs = append(*bs, aside(fmt.Sprintf(
-				"The patch exceeds the 4 MiB capture limit, so only its head was captured. `git -C %s diff %s` for all of it.",
-				o.Job.WorktreePath, short(base))))
+			*bs = append(*bs, asideOf(
+				txt("The patch exceeds the 4 MiB capture limit, so only its head was captured. "),
+				code(fmt.Sprintf("git -C %s diff %s", o.Job.WorktreePath, short(base))),
+				txt(" for all of it.")))
 		}
 		if o.FullDiff {
 			*bs = append(*bs, Block{Kind: BlockCode, Lang: "diff", Text: strings.TrimRight(patch, "\n")})
@@ -430,8 +431,9 @@ func renderDiff(ctx context.Context, bs *[]Block, d *Doc, o Options) {
 			// Write knows it is on disk. Naming it from here would point a reader
 			// at a file that exists only when the engine happened to park this
 			// job — the git command works either way.
-			*bs = append(*bs, aside(fmt.Sprintf("Re-run with `--diff` to read it inline, or `git -C %s diff %s`.",
-				o.Job.WorktreePath, short(base))))
+			*bs = append(*bs, asideOf(
+				txt("Re-run with "), code("--diff"), txt(" to read it inline, or "),
+				code(fmt.Sprintf("git -C %s diff %s", o.Job.WorktreePath, short(base))), txt(".")))
 		}
 	}
 }
@@ -583,6 +585,20 @@ func section(text string) Block {
 func aside(text string) Block {
 	return para(Span{Kind: SpanEmphasis, Text: text})
 }
+
+// asideOf is aside for the ones that quote a command or a filename. The parts
+// are given structurally rather than as a string with backticks in it: the
+// markdown is identical either way, but the browser needs to know which parts
+// are code, and a renderer that recovered that by scanning for backticks would
+// be re-parsing one surface's delimiters out of the other's text — the implicit
+// contract the block model exists to remove.
+func asideOf(parts ...Span) Block {
+	return para(Span{Kind: SpanEmphasis, Children: parts})
+}
+
+// txt and code are shorthand for asideOf's parts.
+func txt(s string) Span  { return Span{Kind: SpanText, Text: s} }
+func code(s string) Span { return Span{Kind: SpanCode, Text: s} }
 
 func bullets(bs *[]Block, heading string, items []string) {
 	if len(items) == 0 {

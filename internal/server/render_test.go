@@ -456,3 +456,33 @@ func writeGateDoc(t *testing.T, e *env, jobID, gate, body string) {
 		t.Fatal(err)
 	}
 }
+
+// TestNestedSpansReachTheBrowser holds the one nesting the document uses:
+// emphasis wrapping inline code, as in the asides that quote a command.
+//
+// It exists because the exhaustiveness walk cannot catch this. That walk asks
+// whether every KIND has a case, and every kind did — while a wrapping span's
+// children were dropped on the floor and four asides rendered as empty italics.
+// A kind being handled is not the same as a span being rendered.
+func TestNestedSpansReachTheBrowser(t *testing.T) {
+	e := newEnv(t)
+	blk := review.Block{Kind: review.BlockParagraph, Spans: []review.Span{{
+		Kind: review.SpanEmphasis,
+		Children: []review.Span{
+			{Kind: review.SpanText, Text: "Re-run with "},
+			{Kind: review.SpanCode, Text: "--diff"},
+			{Kind: review.SpanText, Text: " to read it inline."},
+		},
+	}}}
+	got := renderNamed(t, e, "gateBlock", newBlockView(blk))
+	for _, want := range []string{"<em>", "Re-run with ", "<code>--diff</code>", " to read it inline.", "</em>"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("rendered HTML is missing %q:\n%s", want, got)
+		}
+	}
+	// The markdown surface's literal backticks must not survive into HTML: a
+	// grave accent here means somebody went back to a flat emphasis string.
+	if strings.Contains(got, "`") {
+		t.Errorf("a literal backtick reached the page, so the aside is flat text again:\n%s", got)
+	}
+}

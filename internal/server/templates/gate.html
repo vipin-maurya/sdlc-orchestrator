@@ -162,10 +162,20 @@ now.</p>
 {{define "gateSpan"}}
 {{- if not .Handled}}<em class="err">unrenderable {{.Kind}} span: {{.Text}}</em>
 {{- else if eq .Kind "text"}}{{.Text}}
-{{- else if eq .Kind "strong"}}<strong>{{.Text}}</strong>
-{{- else if eq .Kind "emphasis"}}<em>{{.Text}}</em>
+{{- else if eq .Kind "strong"}}<strong>{{template "spanBody" .}}</strong>
+{{- else if eq .Kind "emphasis"}}<em>{{template "spanBody" .}}</em>
 {{- else if eq .Kind "code"}}<code>{{.Text}}</code>
 {{- else if eq .Kind "path"}}<code class="path">{{.Text}}</code>
 {{- else}}<em class="err">unrenderable {{.Kind}} span: {{.Text}}</em>
+{{- end}}
+{{- end}}
+
+{{/* spanBody prints a span's own text, or recurses into the spans it wraps.
+     Emphasis around inline code is the one nesting the document uses: without
+     it, _source: `x`_ reaches the browser as literal grave accents inside
+     italics, where a reader expects monospace. */}}
+{{define "spanBody"}}
+{{- if .Children}}{{range .Children}}{{template "gateSpan" .}}{{end}}
+{{- else}}{{.Text}}
 {{- end}}
 {{- end}}

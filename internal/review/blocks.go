@@ -61,6 +61,16 @@ var AllSpanKinds = []SpanKind{SpanText, SpanStrong, SpanEmphasis, SpanCode, Span
 type Span struct {
 	Kind SpanKind
 	Text string
+	// Children, when non-empty, are the spans this one wraps, and Text is
+	// ignored. It exists for one shape the document actually needs: emphasis
+	// around inline code, as in _source: `spec.json`_. Without it those asides
+	// carried literal backticks inside the emphasis text, which markdown reads
+	// correctly and HTML does not — the browser showed grave accents where a
+	// reader expects monospace.
+	//
+	// Nesting is not general: only markdownSpan and the HTML renderer walk it,
+	// and nothing in this package builds a span more than two deep.
+	Children []Span
 }
 
 // Item is one bullet plus its indented sub-bullets.
@@ -278,17 +288,32 @@ func writeSpans(b *strings.Builder, spans []Span) {
 // over the same registered set and needs its own equivalent of the second
 // test; the first one already covers both surfaces.
 func markdownSpan(s Span) (string, bool) {
+	// A wrapping span renders its children and puts its own delimiters around
+	// the result, so _source: `x`_ is one emphasis over a text and a code span
+	// and comes out as the same bytes it did when it was one flat string.
+	text := s.Text
+	if len(s.Children) > 0 {
+		var b strings.Builder
+		for _, c := range s.Children {
+			out, ok := markdownSpan(c)
+			if !ok {
+				return "", false
+			}
+			b.WriteString(out)
+		}
+		text = b.String()
+	}
 	switch s.Kind {
 	case SpanText:
-		return s.Text, true
+		return text, true
 	case SpanStrong:
-		return "**" + s.Text + "**", true
+		return "**" + text + "**", true
 	case SpanEmphasis:
-		return "_" + s.Text + "_", true
+		return "_" + text + "_", true
 	case SpanCode, SpanPath:
 		// Both are backticks in markdown; they differ only in what the HTML
 		// renderer is told the string is, which is why SpanPath exists at all.
-		return "`" + s.Text + "`", true
+		return "`" + text + "`", true
 	}
 	return "", false
 }
