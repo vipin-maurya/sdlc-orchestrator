@@ -10,24 +10,31 @@
      an id and a state separately, so the hidden state field can never describe
      a different job than the action URL.
 
+     Each form also carries an id. The Review Dashboard puts a second copy of
+     the approve and reject buttons in the bar pinned to the bottom of the
+     document, and those buttons submit these forms by id rather than by being
+     a second form: two forms posting the same decision would be two places for
+     the hidden state field to be wrong, and only one of them would be tested.
+
      data-gate-state is app.js's hook: when the live stream shows the job in
      another state, or goes stale, the buttons in a form carrying this
-     attribute are disabled in place, with the reason shown. That is a
-     convenience — the server refuses the same POST regardless. */}}
+     attribute — and the buttons elsewhere that submit it — are disabled in
+     place, with the reason shown. That is a convenience: the server refuses
+     the same POST regardless. */}}
 
 {{define "decisionForm"}}
 {{if and .Gate (ne .Gate "hold")}}
 <div class="decide">
-  <form method="post" action="/jobs/{{.Job.ID}}/approve" data-gate-state="{{.Job.State}}">
+  <form id="approve-form" method="post" action="/jobs/{{.Job.ID}}/approve" data-gate-state="{{.Job.State}}">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <input type="hidden" name="state" value="{{.Job.State}}">
     <label for="approve-note">Note for the next agent (optional)</label>
     <input type="text" id="approve-note" name="note" maxlength="500"
-           placeholder="recorded with the approval">
+           placeholder="recorded with the approval, and read verbatim by whatever runs next">
     <button type="submit" class="approve">Approve {{.Gate}}</button>
   </form>
 
-  <form method="post" action="/jobs/{{.Job.ID}}/reject" data-gate-state="{{.Job.State}}">
+  <form id="reject-form" method="post" action="/jobs/{{.Job.ID}}/reject" data-gate-state="{{.Job.State}}">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <input type="hidden" name="state" value="{{.Job.State}}">
     {{/* required, and required again on the server: the reason reaches the
@@ -49,7 +56,7 @@
 
 {{define "holdForm"}}
 <div class="decide hold">
-  <form method="post" action="/jobs/{{.Job.ID}}/resume" data-gate-state="{{.Job.State}}">
+  <form id="resume-form" method="post" action="/jobs/{{.Job.ID}}/resume" data-gate-state="{{.Job.State}}">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <input type="hidden" name="state" value="{{.Job.State}}">
     {{/* The list is engine.ResumableStates(), rendered rather than written
@@ -68,7 +75,7 @@
     <button type="submit" class="resume">Resume</button>
   </form>
 
-  <form method="post" action="/jobs/{{.Job.ID}}/cancel" data-gate-state="{{.Job.State}}">
+  <form id="cancel-form" method="post" action="/jobs/{{.Job.ID}}/cancel" data-gate-state="{{.Job.State}}">
     <input type="hidden" name="csrf" value="{{.CSRF}}">
     <input type="hidden" name="state" value="{{.Job.State}}">
     {{/* A checkbox rather than a bare button, matching promptHold's [y/N]:
@@ -81,6 +88,35 @@
     </label>
     <button type="submit" class="cancel">Cancel job</button>
   </form>
+</div>
+{{end}}
+
+{{/* decisionBar is the copy of the decision that stays on screen while the
+     document scrolls. It renders no form of its own: every button here submits
+     one of the forms above by id, so there is exactly one place the hidden
+     state and csrf fields live and exactly one thing to keep correct.
+
+     It is invoked with the same FormModel, and draws the pair that matches the
+     gate — a held job is cleared with resume or cancel, not approve or
+     reject. */}}
+{{define "decisionBar"}}
+<div class="decide-bar">
+  <div class="progress">
+    {{/* Written by app.js from the checkboxes in the panel. The server renders
+         the un-ticked state, which is what is true before anybody has read
+         anything. */}}
+    <span class="label" id="triage-label">Findings checklist</span>
+    <span class="bar"><span id="triage-bar" style="width: 0%"></span></span>
+  </div>
+  <span class="muted note-inline" id="triage-note"></span>
+  <span class="keys">a approve · r reject</span>
+  {{if eq .Gate "hold"}}
+  <button type="submit" class="cancel" form="cancel-form">Cancel job</button>
+  <button type="submit" class="resume" form="resume-form">Resume</button>
+  {{else if .Gate}}
+  <button type="submit" class="reject" form="reject-form">Request changes</button>
+  <button type="submit" class="approve" form="approve-form">Approve {{.Gate}}</button>
+  {{end}}
 </div>
 {{end}}
 

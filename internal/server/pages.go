@@ -59,11 +59,62 @@ const (
 type jobsPage struct {
 	Waiting []jobRow
 	Rest    []jobRow
+	// Counts is the one-line summary above the grid. It counts every job in
+	// the database, not the filtered rows below it, because it is what the
+	// filter chips are counting *down from* — a chip labelled "failed 2" that
+	// read 0 whenever another filter was active would be useless.
+	Counts jobCounts
+	// Show is the active filter, "" for the default. It is a query parameter
+	// rather than a class app.js toggles: a filtered list is a list an
+	// operator will link someone else to, and it survives a reload.
+	Show    string
+	Filters []jobFilter
+}
+
+// jobFilter is one chip. Count comes from the same pass that built the rows,
+// so a chip never offers a filter with nothing behind it without saying so.
+type jobFilter struct {
+	Key   string
+	Label string
+	Count int
+	On    bool
+}
+
+// jobCounts is the header line's arithmetic. Open is every job the engine
+// could still act on, so it deliberately excludes the terminal three; a "11
+// open" that counted a job cancelled last Tuesday would make the number
+// useless for deciding whether to start another.
+type jobCounts struct {
+	Total   int
+	Open    int
+	Waiting int
+	Running int
+	Held    int
+	Failed  int
+	Done    int
 }
 
 type jobRow struct {
 	Job  *store.Job
 	Gate string
+	// The three shapes the grid draws, all from shape.go so the bar, the state
+	// colour and the pipeline strip on the job's own page cannot disagree.
+	Pct        int
+	StateClass string
+	GateClass  string
+}
+
+// newJobRow shapes one row. Every page that lists jobs goes through it — the
+// grid, and the review queue rail — so a job looks the same in both.
+func newJobRow(j *store.Job) jobRow {
+	g := review.GateFor(j.State)
+	return jobRow{
+		Job:        j,
+		Gate:       g,
+		Pct:        phasePct(j.State, j.PrevState),
+		StateClass: stateClass(j.State),
+		GateClass:  gateClass(g),
+	}
 }
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
@@ -75,16 +126,77 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	// Newest-updated first, before the split, so both blocks inherit the order.
 	sort.SliceStable(jobs, func(i, k int) bool { return jobs[i].UpdatedAt.After(jobs[k].UpdatedAt) })
-	var body jobsPage
+	body := jobsPage{Show: r.URL.Query().Get("show")}
 	for _, j := range jobs {
-		row := jobRow{Job: j, Gate: review.GateFor(j.State)}
+		row := newJobRow(j)
+		body.Counts.Total++
+		switch {
+		case j.State == "COMPLETED":
+			body.Counts.Done++
+		case j.State == "FAILED" || j.State == "CANCELLED":
+			body.Counts.Failed++
+		case row.Gate == "hold":
+			body.Counts.Open++
+			body.Counts.Held++
+		case row.Gate != "":
+			body.Counts.Open++
+			body.Counts.Waiting++
+		default:
+			body.Counts.Open++
+			body.Counts.Running++
+		}
+		if !showsJob(body.Show, row) {
+			continue
+		}
 		if row.Gate != "" {
 			body.Waiting = append(body.Waiting, row)
 			continue
 		}
 		body.Rest = append(body.Rest, row)
 	}
+	body.Filters = jobFilters(body.Show, body.Counts)
 	s.render(w, r, "jobs.html", s.page(r, "Jobs", "jobs", body))
+}
+
+// showsJob applies the ?show= filter. The default hides the terminal three,
+// which is the only filtering this page has ever done implicitly and is now
+// named: an operator who wants a cancelled job can ask for one.
+func showsJob(show string, row jobRow) bool {
+	terminal := row.Job.State == "COMPLETED" || row.Job.State == "FAILED" || row.Job.State == "CANCELLED"
+	switch show {
+	case "all":
+		return true
+	case "waiting":
+		return row.Gate != "" && row.Gate != "hold"
+	case "running":
+		return row.Gate == "" && !terminal
+	case "held":
+		return row.Gate == "hold"
+	case "failed":
+		return row.Job.State == "FAILED" || row.Job.State == "CANCELLED"
+	case "done":
+		return row.Job.State == "COMPLETED"
+	default:
+		return !terminal
+	}
+}
+
+func jobFilters(show string, c jobCounts) []jobFilter {
+	on := func(k string) bool {
+		if k == "open" {
+			return show == "" || show == "open"
+		}
+		return show == k
+	}
+	return []jobFilter{
+		{Key: "open", Label: "open", Count: c.Open, On: on("open")},
+		{Key: "waiting", Label: "waiting", Count: c.Waiting, On: on("waiting")},
+		{Key: "running", Label: "running", Count: c.Running, On: on("running")},
+		{Key: "held", Label: "held", Count: c.Held, On: on("held")},
+		{Key: "failed", Label: "failed", Count: c.Failed, On: on("failed")},
+		{Key: "done", Label: "done", Count: c.Done, On: on("done")},
+		{Key: "all", Label: "all", Count: c.Total, On: on("all")},
+	}
 }
 
 // --- /jobs/{id} ----------------------------------------------------------
@@ -112,6 +224,12 @@ type jobPage struct {
 	ArtifactsDir string
 	LogsDir      string
 	PromptsDir   string
+	// Pipeline is the same strip the gate page draws, from shape.go. The job
+	// page is where an operator lands when a job is *not* at a gate, and "how
+	// far has this got" is the question they arrived with.
+	Pipeline   []phaseView
+	StateClass string
+	GateClass  string
 }
 
 func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +246,9 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 		Job:          j,
 		Gate:         review.GateFor(j.State),
 		Target:       t,
+		Pipeline:     pipelineFor(j.State, j.PrevState),
+		StateClass:   stateClass(j.State),
+		GateClass:    gateClass(review.GateFor(j.State)),
 		Form:         s.formModel(r, j, ""),
 		ArtifactsDir: artifact.ArtifactsDir(dir, j.ID),
 		LogsDir:      artifact.LogsDir(dir, j.ID),
@@ -655,16 +776,120 @@ func readHead(p string, max int64) (data []byte, size int64, truncated bool, err
 // --- /submit -------------------------------------------------------------
 
 type submitPage struct {
-	Targets []string
+	Targets []submitTarget
+	// Gates, Roles and Budgets are what the loaded config will do to this job,
+	// shown beside the form and not editable in it. They are context, not
+	// input: `sdlc submit` takes a target, a title and a body, and a page that
+	// offered a per-job gate list would be promising something no handler
+	// honours (spec §5.2).
+	Gates   []gateOpt
+	Roles   []roleRow
+	Budgets []kvRow
+	// Steps is what happens after the button, in the order it happens. The
+	// design doc asks for it and it costs nothing to be true: an operator who
+	// knows a worktree is cut first knows where to look when it is not.
+	Steps []string
+}
+
+type submitTarget struct {
+	Name   string
+	Repo   string
+	Branch string
+}
+
+// gateOpt is one row of "park for approval at". On is read from the loaded
+// policy, so the page says which gates are actually armed rather than which
+// ones exist.
+type gateOpt struct {
+	Name   string
+	Detail string
+	On     bool
+	// Always marks the two gates policy cannot switch off. A checkbox that
+	// cannot be unchecked is a lie about who is in control, so these draw as
+	// what they are.
+	Always bool
+}
+
+type roleRow struct {
+	Role    string
+	Agent   string
+	Backend string
+	Model   string
+}
+
+type kvRow struct {
+	K    string
+	V    string
+	Note string
 }
 
 func (s *Server) handleSubmitForm(w http.ResponseWriter, r *http.Request) {
-	body := submitPage{}
+	body := submitPage{Steps: []string{
+		"A worktree is cut from the target's default branch at its current head.",
+		"PLANNING writes a plan and a test list into the job's artifacts directory.",
+		"The job parks at the first armed gate and appears in Waiting on you.",
+		"Nothing is pushed or shipped until you approve the merge and release gates.",
+	}}
+	names := make([]string, 0, len(s.cfg.Targets))
 	for name := range s.cfg.Targets {
-		body.Targets = append(body.Targets, name)
+		names = append(names, name)
 	}
-	sort.Strings(body.Targets)
+	sort.Strings(names)
+	for _, name := range names {
+		t := s.cfg.Targets[name]
+		body.Targets = append(body.Targets, submitTarget{Name: name, Repo: t.RepoPath, Branch: t.DefaultBranch})
+	}
+	body.Gates = s.gateOpts()
+	body.Roles = s.roleRows()
+	body.Budgets = s.budgetRows()
 	s.render(w, r, "submit.html", s.page(r, "Submit a job", "submit", body))
+}
+
+// gateOpts reports the four gates and which of them this config arms. The two
+// that are always armed are listed first and marked, because the order a
+// reader scans them in is the order the pipeline reaches them.
+func (s *Server) gateOpts() []gateOpt {
+	p := s.cfg.Policies
+	return []gateOpt{
+		{Name: "spec", Detail: "After design review, before any code is written.", On: p.HumanGate("spec")},
+		{Name: "code", Detail: "After code review, before build and test.", On: p.HumanGate("code")},
+		{Name: "merge", Detail: "Before the branch lands on the base branch.", On: true, Always: true},
+		{Name: "release", Detail: "Before anything leaves this machine.", On: true, Always: true},
+	}
+}
+
+// roleRows resolves each agent state to the backend and model that will run
+// it. The resolution is the config's own — states name an agent, agents name a
+// backend — and is read rather than reimplemented, so a page that says "agy"
+// is saying what the engine will actually invoke.
+func (s *Server) roleRows() []roleRow {
+	out := make([]roleRow, 0, len(config.AgentStates))
+	for _, st := range config.AgentStates {
+		row := roleRow{Role: strings.ToLower(st)}
+		if cs, ok := s.cfg.States[st]; ok {
+			row.Agent = cs.Agent
+			if a, ok := s.cfg.Agents[cs.Agent]; ok {
+				row.Backend, row.Model = a.Backend, a.Model
+			}
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
+// budgetRows is the engine's limits, not the agent's. Each one is a number the
+// engine enforces on its own; naming what happens when it is reached is the
+// half of a budget that tells an operator whether to raise it.
+func (s *Server) budgetRows() []kvRow {
+	l := s.cfg.Limits
+	return []kvRow{
+		{K: "agent invocations", V: strconv.Itoa(l.MaxAgentInvocationsPerJob), Note: "per job"},
+		{K: "fix attempts", V: strconv.Itoa(l.MaxFixAttempts), Note: "then the job fails"},
+		{K: "flake retries", V: strconv.Itoa(l.MaxFlakeRetries), Note: "on an unmodified tree"},
+		{K: "code review rounds", V: strconv.Itoa(l.MaxCodeReviewRounds), Note: ""},
+		{K: "design review rounds", V: strconv.Itoa(l.MaxDesignReviewRounds), Note: ""},
+		{K: "max job duration", V: l.MaxJobDuration.String(), Note: "then TIMED_OUT"},
+	}
 }
 
 // --- /config -------------------------------------------------------------
@@ -679,6 +904,18 @@ type configPage struct {
 	LockFile string
 	Listen   string
 	JobsDir  string
+	// Sections is the loaded config in the shape a reader asks questions in —
+	// which backend reviews, which gates park, what the engine will stop for —
+	// rather than the shape it is stored in. The YAML below it is still the
+	// record; this is the index into it, and every value here is read off the
+	// same *config.Config, never restated.
+	Sections []configSection
+}
+
+type configSection struct {
+	Title string
+	Note  string
+	Rows  []kvRow
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
@@ -697,7 +934,76 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body.YAML, body.Redacted = text, redacted
+	body.Sections = s.configSections()
 	s.render(w, r, "config.html", s.page(r, "Config", "config", body))
+}
+
+// configSections shapes the loaded config into the four questions this page
+// gets asked. No value is computed here that is not already in the struct: a
+// summary that derived something would be a second opinion about a config the
+// loader has already validated.
+func (s *Server) configSections() []configSection {
+	c := s.cfg
+	backends := make([]string, 0, len(c.Backends))
+	for name := range c.Backends {
+		backends = append(backends, name)
+	}
+	sort.Strings(backends)
+
+	independence := "not required"
+	if st, ok := c.States[config.StFinalReview]; ok && st.MustDifferBackendFrom != "" {
+		independence = "must differ from " + strings.ToLower(st.MustDifferBackendFrom)
+	}
+	reviewerWrites := "not checked"
+	if c.Policies.ReviewerDiffMustBeEmpty {
+		reviewerWrites = "reviewer diff must be empty"
+	}
+
+	var armed []string
+	for _, g := range s.gateOpts() {
+		if g.On {
+			armed = append(armed, g.Name)
+		}
+	}
+
+	verify := "off — every finding gates on the reviewer's word"
+	if c.Limits.VerifyVotes > 0 {
+		verify = fmt.Sprintf("%d votes, %d must confirm", c.Limits.VerifyVotes, c.Limits.VerifyMinConfirm)
+	}
+
+	devices := strings.Join(c.Resources.Devices.Serials, ", ")
+	if devices == "" {
+		devices = "none configured"
+		if c.Resources.Devices.Discover {
+			devices = "discovered from adb"
+		}
+	}
+
+	return []configSection{
+		{Title: "Agents", Note: "resolved per state at job start", Rows: []kvRow{
+			{K: "backends", V: strings.Join(backends, ", "), Note: fmt.Sprintf("%d configured", len(backends))},
+			{K: "review independence", V: independence, Note: "refuses to start otherwise"},
+			{K: "reviewer writes", V: reviewerWrites, Note: ""},
+			{K: "agent retries", V: strconv.Itoa(c.Limits.MaxAgentRetries), Note: ""},
+		}},
+		{Title: "Gates", Note: "which states park for a human", Rows: []kvRow{
+			{K: "armed gates", V: strings.Join(armed, ", "), Note: "merge and release always"},
+			{K: "design review blocks at", V: c.Policies.DesignReviewBlocksAt, Note: ""},
+			{K: "code review blocks at", V: c.Policies.CodeReviewBlocksAt, Note: ""},
+			{K: "final review blocks at", V: c.Policies.FinalReviewBlocksAt, Note: ""},
+			{K: "finding verification", V: verify, Note: "gating findings only"},
+			{K: "protected branches", V: strings.Join(c.Policies.ProtectedBranches, ", "), Note: "never a merge target"},
+		}},
+		{Title: "Budgets", Note: "enforced by the engine, not the agent", Rows: s.budgetRows()},
+		{Title: "Machine", Note: "shared across every job", Rows: []kvRow{
+			{K: "max parallel jobs", V: strconv.Itoa(c.Orchestrator.MaxParallelJobs), Note: ""},
+			{K: "poll interval", V: c.Orchestrator.PollInterval.String(), Note: ""},
+			{K: "gradle slots", V: strconv.Itoa(c.Resources.GradleSlots), Note: "concurrent"},
+			{K: "devices", V: devices, Note: "leased per test run"},
+			{K: "worktree cleanup", V: c.Git.CleanupWorktrees, Note: ""},
+			{K: "serve address", V: c.Server.Listen, Note: "loopback only"},
+		}},
+	}
 }
 
 // absOrAsIs makes a relative path readable without hiding it. The default data

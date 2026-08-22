@@ -3,30 +3,120 @@
      The form posts the four fields §5.2 pins and nothing else; every rule about
      what a valid submission is lives in internal/jobs, so this page must not
      grow a second opinion about it. The hidden csrf input is not optional —
-     without it the POST is refused (AC-11). */}}
+     without it the POST is refused (AC-11).
+
+     The column beside it is the Review Dashboard's: the command this form is
+     equivalent to, what happens after the button, and what the loaded config
+     will do to the job. All three are read-only, and deliberately so. Gates,
+     backends and budgets are config, not per-job input; rendering them as
+     controls would promise something no handler honours. */}}
 {{define "content"}}
-<h1>Submit a job</h1>
 {{with .Body}}
 {{if .Targets}}
-<form class="decision" method="post" action="/submit">
-  <input type="hidden" name="csrf" value="{{$.CSRF}}">
-  <label for="target">Target</label>
-  <select id="target" name="target">
-    {{range .Targets}}<option value="{{.}}">{{.}}</option>{{end}}
-  </select>
+<div class="cols">
+  <form id="submit-form" class="stack" method="post" action="/submit">
+    <input type="hidden" name="csrf" value="{{$.CSRF}}">
 
-  <label for="title">Title</label>
-  <input id="title" type="text" name="title" autocomplete="off">
+    <div>
+      <h1 style="margin: 0;">Submit a job</h1>
+      <p class="muted" style="margin: .5rem 0 0; font-size: 13px;">The orchestrator cuts a
+        worktree, writes a plan, implements it, and parks at every gate this config arms.</p>
+    </div>
 
-  <label for="body">Body — or paste an issue file here</label>
-  <textarea id="body" name="body"></textarea>
-  <p class="muted">Leave the title blank and the first line of the body, stripped of a
-    leading <code>#</code>, becomes it — the same rule <code>sdlc submit --file</code> uses.</p>
+    <div class="field">
+      <span class="eyebrow">Target</span>
+      <select id="target" name="target">
+        {{range .Targets}}<option value="{{.Name}}">{{.Name}} — {{.Repo}} ({{.Branch}})</option>{{end}}
+      </select>
+    </div>
 
-  <button class="primary" type="submit">Submit</button>
-</form>
+    <div class="field">
+      <span class="eyebrow">Title</span>
+      <input id="title" type="text" name="title" autocomplete="off"
+             placeholder="one line, imperative — it becomes the branch name">
+    </div>
+
+    <div class="field">
+      <span class="eyebrow">Issue</span>
+      <textarea id="body" name="body" style="min-height: 10rem;"
+                placeholder="What is wrong, how to reproduce it, what done looks like. Passed to PLANNING verbatim."></textarea>
+      <p class="muted" style="margin: 0; font-size: 12px;">Leave the title blank and the first
+        line of the body, stripped of a leading <code>#</code>, becomes it — the same rule
+        <code>sdlc submit --file</code> uses.</p>
+    </div>
+
+    <div class="field">
+      <span class="eyebrow">Gates this config arms</span>
+      <div class="rows grid2">
+        {{range .Gates}}
+        <div>
+          <div class="meta" style="gap: .4rem;">
+            <span class="gatepill {{gateClass .Name}}">{{.Name}}</span>
+            {{if .Always}}<span class="muted">always</span>
+            {{else if .On}}<span class="badge ok">armed</span>
+            {{else}}<span class="muted">off</span>{{end}}
+          </div>
+          <div class="muted" style="font-size: 12px; margin-top: .35rem; line-height: 1.45;">{{.Detail}}</div>
+        </div>
+        {{end}}
+      </div>
+      <p class="muted" style="margin: 0; font-size: 12px;">Which gates park is a policy in the
+        config file, not a per-job choice — see <a href="/config">Config</a>.</p>
+    </div>
+
+    <div class="field">
+      <span class="eyebrow">Agent backends</span>
+      <div class="rows">
+        {{range .Roles}}
+        <div class="kv">
+          <span class="k">{{.Role}}</span>
+          <span class="v">{{if .Backend}}{{.Backend}}{{else}}—{{end}}{{if .Model}} · {{.Model}}{{end}}</span>
+          <span class="n">{{.Agent}}</span>
+        </div>
+        {{end}}
+      </div>
+    </div>
+
+    <div class="field">
+      <span class="eyebrow">Budgets</span>
+      <div class="rows">
+        {{range .Budgets}}
+        <div class="kv"><span class="k">{{.K}}</span><span class="v">{{.V}}</span><span class="n">{{.Note}}</span></div>
+        {{end}}
+      </div>
+    </div>
+  </form>
+
+  <div class="side">
+    <div class="card">
+      <div class="card-head">The same command</div>
+      {{/* Kept in step with the two fields above it by app.js, which writes
+           only textContent. With JavaScript off it still shows the shape of
+           the command, which is what a reader copying it needs. */}}
+      <div class="card-body cli" id="submit-cli">sdlc submit &lt;target&gt; --title "..." --file issue.md</div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">What happens first</div>
+      <div class="rows" style="border: 0; border-radius: 0;">
+        {{range $i, $s := .Steps}}
+        <div style="display: flex; gap: .6rem; font-size: 12.5px; line-height: 1.5;">
+          <span class="mono" style="color: var(--link);">{{add $i 1}}</span>
+          <span>{{$s}}</span>
+        </div>
+        {{end}}
+      </div>
+    </div>
+
+    {{/* Outside the form element, and submitting it by id — the same trick the
+         review page's decision bar uses, for the same reason: one form, so
+         there is one place the csrf token lives. */}}
+    <button class="primary" type="submit" form="submit-form">Queue the job</button>
+  </div>
+</div>
 {{else}}
-<p class="banner warn">The loaded config defines no targets, so there is nothing to
+<h1>Submit a job</h1>
+<p class="note warn">The loaded config defines no targets, so there is nothing to
   submit a job against. See <a href="/config">the config page</a>.</p>
 {{end}}
 {{end}}

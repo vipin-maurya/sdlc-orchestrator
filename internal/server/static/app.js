@@ -1,9 +1,10 @@
-// Live updates. Owner: W2-L.
+// Live updates, the command palette and the findings checklist. Owner: W2-L.
 //
 // Every page here is server-rendered and stays usable with this file absent or
 // with JavaScript off: nothing below is needed to read a gate or record a
-// decision. What it adds is the thing a static page cannot do — say how old
-// what you are looking at is.
+// decision. What it adds is the things a static page cannot do — say how old
+// what you are looking at is, jump to a job without going through the list, and
+// keep count of which findings you have actually read.
 //
 // Two rules run through all of it.
 //
@@ -138,9 +139,26 @@
     return m ? decodeURIComponent(m[1]) : null;
   }
 
+  // Buttons in the form, plus the buttons elsewhere on the page that submit it
+  // by id. The review page's decision bar is the second kind: it is the copy
+  // of Approve that stays on screen while the document scrolls, and leaving it
+  // enabled while the one in the panel was disabled would mean the whole
+  // staleness guard could be walked straight past.
+  function buttonsFor(form) {
+    var own = form.querySelectorAll("button, input[type=submit]");
+    var out = [];
+    var i;
+    for (i = 0; i < own.length; i++) out.push(own[i]);
+    if (form.id) {
+      var linked = document.querySelectorAll('[form="' + form.id + '"]');
+      for (i = 0; i < linked.length; i++) out.push(linked[i]);
+    }
+    return out;
+  }
+
   function setFormReason(form, reason) {
     var note = form.querySelector(".live-note");
-    var buttons = form.querySelectorAll("button, input[type=submit]");
+    var buttons = buttonsFor(form);
     var i;
     if (!reason) {
       form.removeAttribute("data-disabled");
@@ -178,7 +196,7 @@
     }
 
     var structural = false;
-    var rows = document.querySelectorAll("tr[data-job]");
+    var rows = document.querySelectorAll("[data-job]");
     var shown = Object.create(null);
     for (i = 0; i < rows.length; i++) {
       var row = rows[i];
@@ -193,7 +211,11 @@
       if (hadGate(row) !== !!job.gate) structural = true;
       patchRow(row, job);
     }
-    if (location.pathname === "/jobs") {
+    // A job the list has never drawn is structural too — but only when the
+    // list is unfiltered. With ?show= set, a job missing from the page is the
+    // filter working, and reloading for it would loop forever.
+    var list = document.querySelector("[data-joblist]");
+    if (list && !list.getAttribute("data-show")) {
       for (var id2 in present) {
         if (!shown[id2]) structural = true;
       }
@@ -229,9 +251,9 @@
     }
   }
 
-  // The gate cell holds a badge element, so it is rebuilt with createElement
-  // rather than assigned as markup. The gate vocabulary is fixed today, but
-  // this is the one cell whose value has structure, so it is the one an
+  // The gate cell holds a link, so it is rebuilt with createElement rather
+  // than assigned as markup. The gate vocabulary is fixed today, but this is
+  // the one cell whose value has structure, so it is the one an
   // assigned-markup shortcut would be reached for first.
   function setGate(row, gate) {
     var cell = row.querySelector("[data-field=gate]");
@@ -240,13 +262,14 @@
       if (cell.textContent.trim()) cell.replaceChildren();
       return;
     }
-    var badge = cell.querySelector(".badge");
-    if (!badge) {
-      badge = document.createElement("span");
-      badge.className = "badge gate";
-      cell.replaceChildren(badge);
+    var pill = cell.querySelector(".gatepill");
+    if (!pill) {
+      pill = document.createElement("a");
+      pill.className = "gatepill";
+      pill.href = "/jobs/" + encodeURIComponent(row.getAttribute("data-job")) + "/gate";
+      cell.replaceChildren(pill);
     }
-    if (badge.textContent !== gate) badge.textContent = gate;
+    if (pill.textContent !== gate) pill.textContent = gate;
   }
 
   // reloadSoon repaints the page from the server, which is the only thing that
@@ -308,6 +331,267 @@
     es.addEventListener("open", function () {
       errorSince = null;
       paintPill();
+    });
+  }
+
+  // --- the findings checklist ---------------------------------------------
+
+  // The boxes in the decision panel are a note to yourself: nothing is posted
+  // and no decision is blocked by them. What they buy is the count in the bar
+  // under the document, which is the difference between having read four
+  // findings and having scrolled past them.
+  //
+  // The count is computed from the DOM on every change rather than from a
+  // counter kept alongside it. A tally that drifts from what is on screen is
+  // worse than no tally, and this way there is nothing to drift.
+  function setupTriage() {
+    var list = document.getElementById("triage");
+    var label = document.getElementById("triage-label");
+    var bar = document.getElementById("triage-bar");
+    var note = document.getElementById("triage-note");
+    if (!list || !label || !bar) return;
+
+    var boxes = list.querySelectorAll("input[type=checkbox]");
+    if (!boxes.length) return;
+
+    function paint() {
+      var done = 0;
+      for (var i = 0; i < boxes.length; i++) if (boxes[i].checked) done++;
+      label.textContent = done + " of " + boxes.length + " findings marked read";
+      bar.style.width = Math.round((done / boxes.length) * 100) + "%";
+      if (note) {
+        note.textContent = done === boxes.length
+          ? "every finding marked read"
+          : boxes.length - done + " not marked — the decision is yours either way";
+      }
+    }
+
+    for (var i = 0; i < boxes.length; i++) boxes[i].addEventListener("change", paint);
+    paint();
+  }
+
+  // --- the submit page's command preview ----------------------------------
+
+  // Kept in step with the two fields it names, and written with textContent
+  // only. The server renders the shape of the command, so a reader with
+  // JavaScript off still gets something they can copy and edit.
+  function setupSubmitPreview() {
+    var out = document.getElementById("submit-cli");
+    var target = document.getElementById("target");
+    var title = document.getElementById("title");
+    if (!out || !target) return;
+
+    function paint() {
+      var t = target.value || "<target>";
+      var line = "sdlc submit " + t;
+      if (title && title.value) line += ' --title "' + title.value + '"';
+      out.textContent = line + " --file issue.md";
+    }
+    target.addEventListener("change", paint);
+    if (title) title.addEventListener("input", paint);
+    paint();
+  }
+
+  // --- the command palette -------------------------------------------------
+
+  // A view over the job list, built in the browser from /api/jobs.json. It is
+  // not server-rendered on purpose: a palette baked into every page would be
+  // one more thing that can be stale about which jobs exist, and this one is
+  // fetched at the moment it is opened.
+  var palette = null;
+
+  function openPalette() {
+    if (palette) return;
+    palette = buildPalette();
+    document.body.appendChild(palette.root);
+    palette.input.focus();
+    loadPaletteJobs();
+  }
+
+  function closePalette() {
+    if (!palette) return;
+    palette.root.remove();
+    palette = null;
+  }
+
+  function buildPalette() {
+    var root = document.createElement("div");
+    root.className = "overlay";
+    root.addEventListener("mousedown", function (e) {
+      if (e.target === root) closePalette();
+    });
+
+    var sheet = document.createElement("div");
+    sheet.className = "sheet";
+    root.appendChild(sheet);
+
+    var q = document.createElement("div");
+    q.className = "q";
+    var caret = document.createElement("span");
+    caret.textContent = ">";
+    var input = document.createElement("input");
+    input.type = "text";
+    input.setAttribute("aria-label", "Search jobs");
+    input.placeholder = "job id, title or state";
+    q.appendChild(caret);
+    q.appendChild(input);
+    sheet.appendChild(q);
+
+    var list = document.createElement("div");
+    list.className = "list";
+    sheet.appendChild(list);
+
+    var p = { root: root, input: input, list: list, items: [], rows: [], at: 0 };
+    input.addEventListener("input", function () { paintPalette(p); });
+    input.addEventListener("keydown", function (e) { paletteKey(p, e); });
+    return p;
+  }
+
+  function loadPaletteJobs() {
+    var p = palette;
+    // The stream has already delivered a list on the job pages, but it is
+    // narrowed to one job there. Asking for the whole list is one small
+    // request and is the only way the palette can reach a job the current page
+    // has never mentioned.
+    fetch("/api/jobs.json", { cache: "no-store", credentials: "same-origin" })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (snap) {
+        if (!palette || palette !== p || !snap || !snap.jobs) return;
+        p.items = snap.jobs;
+        paintPalette(p);
+      })
+      .catch(function () {
+        // Nothing to show and nothing to say: the pill already reports whether
+        // the server is reachable, and a second error message about it would
+        // be the same news twice.
+      });
+    paintPalette(p);
+  }
+
+  function matches(job, needle) {
+    if (!needle) return true;
+    var hay = (job.id + " " + (job.title || "") + " " + (job.state || "") +
+               " " + (job.gate || "") + " " + (job.target || "")).toLowerCase();
+    return hay.indexOf(needle) >= 0;
+  }
+
+  function paintPalette(p) {
+    var needle = p.input.value.trim().toLowerCase();
+    var hits = [];
+    var i;
+    for (i = 0; i < p.items.length && hits.length < 20; i++) {
+      if (matches(p.items[i], needle)) hits.push(p.items[i]);
+    }
+    // Waiting first. The palette is opened most often to get back to a
+    // decision, and a job that needs one must not sort below one that does
+    // not — the same rule the job list is split by.
+    hits.sort(function (a, b) { return (b.gate ? 1 : 0) - (a.gate ? 1 : 0); });
+
+    p.rows = [];
+    p.list.replaceChildren();
+    if (!hits.length) {
+      var empty = document.createElement("div");
+      empty.className = "empty";
+      empty.textContent = p.items.length ? "No job matches." : "Reading the job list…";
+      p.list.appendChild(empty);
+      return;
+    }
+    for (i = 0; i < hits.length; i++) {
+      p.list.appendChild(paletteRow(p, hits[i]));
+    }
+    if (p.at >= p.rows.length) p.at = 0;
+    markPaletteRow(p);
+  }
+
+  // Built element by element, never from a string: job titles are written by
+  // whoever filed the issue.
+  function paletteRow(p, job) {
+    var a = document.createElement("a");
+    a.href = job.gate ? "/jobs/" + encodeURIComponent(job.id) + "/gate"
+                      : "/jobs/" + encodeURIComponent(job.id);
+
+    var id = document.createElement("span");
+    id.className = "mono";
+    id.textContent = job.id;
+    a.appendChild(id);
+
+    var title = document.createElement("span");
+    title.textContent = job.title || "";
+    a.appendChild(title);
+
+    var hint = document.createElement("span");
+    hint.className = "hint";
+    hint.textContent = job.gate ? job.gate + " gate" : (job.state || "");
+    a.appendChild(hint);
+
+    p.rows.push(a);
+    return a;
+  }
+
+  function markPaletteRow(p) {
+    for (var i = 0; i < p.rows.length; i++) {
+      if (i === p.at) p.rows[i].classList.add("on");
+      else p.rows[i].classList.remove("on");
+    }
+    if (p.rows[p.at] && p.rows[p.at].scrollIntoView) {
+      p.rows[p.at].scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function paletteKey(p, e) {
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      p.at = Math.min(p.at + 1, p.rows.length - 1);
+      markPaletteRow(p);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      p.at = Math.max(p.at - 1, 0);
+      markPaletteRow(p);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (p.rows[p.at]) location.href = p.rows[p.at].href;
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      closePalette();
+    }
+  }
+
+  // --- keyboard ------------------------------------------------------------
+
+  // Three keys, and every one of them has a control on the page that does the
+  // same thing. A shortcut is a shortcut; none of these is the only way to do
+  // anything, and none of them decides anything on its own — "a" scrolls the
+  // approve button into view and focuses it, it does not approve.
+  function setupKeys() {
+    var opener = document.getElementById("palette-open");
+    if (opener) {
+      opener.hidden = false;
+      opener.style.display = "inline-flex";
+      opener.addEventListener("click", openPalette);
+    }
+
+    document.addEventListener("keydown", function (e) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        if (palette) closePalette();
+        else openPalette();
+        return;
+      }
+      if (e.key === "Escape") { closePalette(); return; }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      // Typing "a" into the reject reason must not be a shortcut.
+      var t = e.target;
+      if (t && (/^(input|textarea|select)$/i.test(t.tagName) || t.isContentEditable)) return;
+
+      var form = null;
+      if (e.key === "a") form = document.getElementById("approve-form");
+      else if (e.key === "r") form = document.getElementById("reject-form");
+      if (!form) return;
+      var button = form.querySelector("button[type=submit]");
+      if (!button || button.disabled) return;
+      e.preventDefault();
+      if (button.scrollIntoView) button.scrollIntoView({ block: "center" });
+      button.focus();
     });
   }
 
@@ -376,6 +660,9 @@
   paintTimes(document);
   paintPill();
   setupFollow();
+  setupTriage();
+  setupSubmitPreview();
+  setupKeys();
   connect();
   setInterval(function () {
     // One timer for both: the ages on the page and the pill's own claim go

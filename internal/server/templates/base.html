@@ -26,6 +26,13 @@
     <a href="/submit" {{if eq .Nav "submit"}}class="on"{{end}}>Submit</a>
     <a href="/config" {{if eq .Nav "config"}}class="on"{{end}}>Config</a>
   </nav>
+  {{/* Hidden until app.js unhides it. The palette is a view over the job list
+       the browser fetches for itself, so with JavaScript off there is nothing
+       behind this button — and an opener that opens nothing is worse than one
+       that was never offered. The nav beside it reaches every page regardless. */}}
+  <button type="button" id="palette-open" class="palette-open" hidden>
+    Search jobs <kbd>Ctrl K</kbd>
+  </button>
   {{/* The pill's text is written by app.js from the stream's age. Nothing
        server-side claims freshness: a "live" rendered on the server is a claim
        about a moment that has already passed by the time it is read. */}}
@@ -42,7 +49,11 @@
 here are stored and applied when one starts.</p>
 {{end}}
 
-<main>
+{{/* .Layout is "" for a document page and "review" for the three-pane gate.
+     The class lands here rather than being set from inside a content block,
+     because this element belongs to the layout: a page reaching up to widen
+     itself is how two pages end up disagreeing about the shell they share. */}}
+<main{{if .Layout}} class="{{.Layout}}"{{end}}>
 {{template "content" .}}
 </main>
 

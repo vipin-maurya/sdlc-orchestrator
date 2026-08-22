@@ -160,9 +160,16 @@ func (s *Server) funcMap() template.FuncMap {
 		"rfc3339": rfc3339,
 		"short":   shortSHA,
 		"gateFor": review.GateFor,
-		"sevRank": func(sev string) int { return artifact.SeverityRank[sev] },
-		"base":    path.Base,
-		"add":     func(a, b int) int { return a + b },
+		// gateClass and stateClass return a class name from a closed set
+		// (shape.go), never the value they were given. That is the whole
+		// point of them: a template that built a class out of a state string
+		// would let whatever wrote that string choose which of this UI's
+		// styles it wears.
+		"gateClass":  gateClass,
+		"stateClass": stateClass,
+		"sevRank":    func(sev string) int { return artifact.SeverityRank[sev] },
+		"base":       path.Base,
+		"add":        func(a, b int) int { return a + b },
 	}
 }
 
@@ -320,13 +327,26 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // --- shared helpers ------------------------------------------------------
 
 type pageData struct {
-	Title    string
-	Nav      string // "jobs" | "submit" | "config"
+	Title string
+	Nav   string // "jobs" | "submit" | "config"
+	// Layout is the class base.html puts on <main>: "" for a document page,
+	// "review" for the three-pane gate. It is a field rather than something
+	// the content template sets because the element it lands on belongs to
+	// base.html, and a page reaching up into the layout to widen itself is how
+	// two pages end up disagreeing about the shell they share.
+	Layout   string
 	CSRF     string
 	EngineUp bool // orchestrator.lock_file exists
 	Assets   map[string]string
 	Now      time.Time
 	Body     any
+}
+
+// wide returns the page with a layout class set. Written as a method on the
+// value so a handler reads s.page(...).wide("review") in one expression.
+func (p pageData) wide(layout string) pageData {
+	p.Layout = layout
+	return p
 }
 
 // page wraps a per-page model in everything base.html needs.

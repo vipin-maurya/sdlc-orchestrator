@@ -29,6 +29,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -75,9 +77,99 @@ type gateBody struct {
 	Blocks  []blockView
 	HasDiff bool
 
+	// Pipeline is the strip above the document (shape.go), so a reviewer can
+	// see what the gate is a gate *between* before reading a word of it.
+	Pipeline []phaseView
+
+	// Queue and Running are the rail beside the document. A gate is decided
+	// one at a time, but it is decided in the knowledge of what else is
+	// waiting; the rail is that knowledge, and it is why this page can be the
+	// only one an operator keeps open.
+	//
+	// Queue is oldest-first: the job that has been waiting longest is the one
+	// that has cost the most by waiting. Running is newest-first and is
+	// there to answer "is anything actually happening", which is the question
+	// an empty queue raises.
+	Queue   []jobRow
+	Running []jobRow
+
+	// Findings is every finding in the document, flattened out of Blocks. The
+	// decision panel checks them off one by one; the document still renders
+	// them in place, and this is the same slice, not a second reading of the
+	// artifact.
+	Findings []findingView
+
+	// Facts is the decision panel's summary — where the job is, what it is
+	// merging, and whether the document above was rendered live. It repeats
+	// what the document says on purpose: the panel is what stays on screen
+	// while the document scrolls.
+	Facts []kvRow
+
 	// Form is W2-I's model, invoked as {{template "decisionForm" .Form}}. The
 	// gate page is where the decision is made, so the form belongs on it.
 	Form FormModel
+}
+
+// blockFindings flattens the document's findings blocks in document order.
+// Order matters: the checklist in the panel and the findings in the document
+// are read against each other, and a panel sorted differently from the page it
+// sits beside is a panel that has to be searched rather than scanned.
+func blockFindings(blocks []blockView) []findingView {
+	var out []findingView
+	for _, b := range blocks {
+		out = append(out, b.Findings...)
+	}
+	return out
+}
+
+// gateFacts is the panel's summary. Every value is read off the job or off the
+// document that was actually rendered — nothing here asks git a second
+// question, because the answer would be from a different moment than the
+// document above it.
+func gateFacts(j *store.Job, src docSource) []kvRow {
+	facts := []kvRow{
+		{K: "state", V: j.State},
+		{K: "from", V: j.PrevState},
+		{K: "target", V: j.Target},
+		{K: "branch", V: j.Branch},
+		{K: "head", V: shortSHA(j.HeadSHA)},
+		{K: "base", V: shortSHA(j.Counters.BaseSHA)},
+		{K: "agent invocations", V: strconv.Itoa(j.Counters.AgentInvocations)},
+	}
+	if src == docLive {
+		facts = append(facts, kvRow{K: "document", V: "live from the worktree"})
+	} else {
+		facts = append(facts, kvRow{K: "document", V: "saved snapshot"})
+	}
+	return facts
+}
+
+// rail builds the two lists beside the document. A failure to read the job
+// list is not a failure of this page: the document and the decision it is
+// asking for are both already in hand, and refusing to draw them because a
+// sidebar query failed would withhold exactly what the reader came for.
+func (s *Server) rail(current *store.Job) (queue, running []jobRow) {
+	jobs, err := s.st.ListJobs()
+	if err != nil {
+		s.log.Printf("reading the job list for the review rail: %v", err)
+		return nil, nil
+	}
+	for _, j := range jobs {
+		row := newJobRow(j)
+		switch {
+		case row.Gate != "":
+			queue = append(queue, row)
+		case isRunning(j.State):
+			running = append(running, row)
+		}
+	}
+	sort.SliceStable(queue, func(a, b int) bool {
+		return queue[a].Job.StateEnteredAt.Before(queue[b].Job.StateEnteredAt)
+	})
+	sort.SliceStable(running, func(a, b int) bool {
+		return running[a].Job.UpdatedAt.After(running[b].Job.UpdatedAt)
+	})
+	return queue, running
 }
 
 // handleGate serves GET /jobs/{id}/gate.
@@ -114,9 +206,13 @@ func (s *Server) handleGate(w http.ResponseWriter, r *http.Request) {
 		SourcePath: review.DocPath(s.cfg.Orchestrator.DataDir, j.ID, gate),
 		Blocks:     blockViews(doc.Blocks),
 		HasDiff:    doc.Diff != "",
+		Pipeline:   pipelineFor(j.State, j.PrevState),
+		Facts:      gateFacts(j, src),
 		Form:       s.formModel(r, j, ""),
 	}
-	s.render(w, r, "gate.html", s.page(r, j.ID+" — "+doc.Gate+" gate", "jobs", body))
+	body.Findings = blockFindings(body.Blocks)
+	body.Queue, body.Running = s.rail(j)
+	s.render(w, r, "gate.html", s.page(r, j.ID+" — "+doc.Gate+" gate", "jobs", body).wide("review"))
 }
 
 // --- A2: live, with the snapshot as the fallback -------------------------

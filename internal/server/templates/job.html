@@ -2,16 +2,30 @@
 
      Counters, hold reason and resume-after are printed as facts with no
      interpretation: the engine decides what they mean, and a page that
-     paraphrased them would be a second opinion about a job's state. */}}
+     paraphrased them would be a second opinion about a job's state.
+
+     This is the page an operator lands on when a job is *not* at a gate, so it
+     leads with the same pipeline strip the gate page draws — "how far has this
+     got" is the question they arrived with, and it is not one the counters
+     answer. */}}
 {{define "content"}}
 {{with .Body}}
-<h1>{{.Job.ID}} <span class="badge">{{.Job.State}}</span>
-  {{if .Gate}}<span class="badge gate">{{.Gate}}</span>{{end}}</h1>
-<p>{{.Job.IssueTitle}}</p>
+<div class="meta" style="margin-bottom: .35rem;">
+  <strong>{{.Job.ID}}</strong>
+  <span class="state {{.StateClass}}">{{.Job.State}}</span>
+  {{if .Gate}}<span class="gatepill {{.GateClass}}">{{.Gate}} gate</span>{{end}}
+  <span>since <time datetime="{{rfc3339 .Job.StateEnteredAt}}">{{rfc3339 .Job.StateEnteredAt}}</time></span>
+</div>
+<h1>{{.Job.IssueTitle}}</h1>
+
+<div class="pipeline">
+  {{range .Pipeline}}<span class="phase {{.Class}}">{{.Label}}</span>{{end}}
+</div>
 
 {{if .Gate}}
-<p class="banner warn">This job is waiting for a decision at the
-  <strong>{{.Gate}}</strong> gate. <a href="/jobs/{{.Job.ID}}/gate">Read what is being decided</a>.</p>
+<p class="note warn">This job is waiting for a decision at the
+  <strong>{{.Gate}}</strong> gate. <a href="/jobs/{{.Job.ID}}/gate">Read what is being decided</a>
+  — the gate page carries the document, the diff and the queue beside it.</p>
 {{/* The forms themselves are W2-I's named templates, rendered from the
      FormModel this page carries. The hold gate gets resume/cancel rather than
      approve/reject: a held job is not waiting for a judgement about a
@@ -20,62 +34,94 @@
 {{end}}
 
 {{if .Job.HoldReason}}
-<p class="banner bad">Held: {{.Job.HoldReason}}</p>
+<p class="note bad" style="margin-top: 1rem;">Held: {{.Job.HoldReason}}</p>
 {{end}}
 
-<dl class="facts">
-  <dt>target</dt><dd>{{.Job.Target}}</dd>
-  <dt>repo</dt><dd>{{.Target.RepoPath}}</dd>
-  <dt>default branch</dt><dd>{{.Target.DefaultBranch}}</dd>
-  <dt>branch</dt><dd>{{.Job.Branch}}</dd>
-  <dt>worktree</dt><dd>{{.Job.WorktreePath}}</dd>
-  <dt>state</dt><dd>{{.Job.State}}{{if .Job.PrevState}} (from {{.Job.PrevState}}){{end}}</dd>
-  <dt>since</dt><dd><time datetime="{{rfc3339 .Job.StateEnteredAt}}">{{rfc3339 .Job.StateEnteredAt}}</time></dd>
-  <dt>updated</dt><dd><time datetime="{{rfc3339 .Job.UpdatedAt}}">{{rfc3339 .Job.UpdatedAt}}</time></dd>
-  <dt>created</dt><dd><time datetime="{{rfc3339 .Job.CreatedAt}}">{{rfc3339 .Job.CreatedAt}}</time></dd>
-  <dt>head</dt><dd>{{short .Job.HeadSHA}}</dd>
-  <dt>base</dt><dd>{{short .Job.Counters.BaseSHA}}</dd>
-  {{if not .Job.ResumeAfter.IsZero}}
-  <dt>resume after</dt><dd><time datetime="{{rfc3339 .Job.ResumeAfter}}">{{rfc3339 .Job.ResumeAfter}}</time></dd>
-  {{end}}
-  <dt>hold reason</dt><dd>{{if .Job.HoldReason}}{{.Job.HoldReason}}{{else}}—{{end}}</dd>
-  <dt>artifacts dir</dt><dd>{{.ArtifactsDir}}</dd>
-  <dt>logs dir</dt><dd>{{.LogsDir}}</dd>
-  <dt>prompts dir</dt><dd>{{.PromptsDir}}</dd>
-</dl>
+<div class="cols" style="margin-top: 1.5rem;">
+  <div class="stack">
+    <div>
+      <h2 style="margin-top: 0;">Where it is</h2>
+      <dl class="facts">
+        <dt>target</dt><dd>{{.Job.Target}}</dd>
+        <dt>repo</dt><dd>{{.Target.RepoPath}}</dd>
+        <dt>default branch</dt><dd>{{.Target.DefaultBranch}}</dd>
+        <dt>branch</dt><dd>{{.Job.Branch}}</dd>
+        <dt>worktree</dt><dd>{{.Job.WorktreePath}}</dd>
+        <dt>state</dt><dd>{{.Job.State}}{{if .Job.PrevState}} (from {{.Job.PrevState}}){{end}}</dd>
+        <dt>since</dt><dd><time datetime="{{rfc3339 .Job.StateEnteredAt}}">{{rfc3339 .Job.StateEnteredAt}}</time></dd>
+        <dt>updated</dt><dd><time datetime="{{rfc3339 .Job.UpdatedAt}}">{{rfc3339 .Job.UpdatedAt}}</time></dd>
+        <dt>created</dt><dd><time datetime="{{rfc3339 .Job.CreatedAt}}">{{rfc3339 .Job.CreatedAt}}</time></dd>
+        <dt>head</dt><dd>{{short .Job.HeadSHA}}</dd>
+        <dt>base</dt><dd>{{short .Job.Counters.BaseSHA}}</dd>
+        {{if not .Job.ResumeAfter.IsZero}}
+        <dt>resume after</dt><dd><time datetime="{{rfc3339 .Job.ResumeAfter}}">{{rfc3339 .Job.ResumeAfter}}</time></dd>
+        {{end}}
+        <dt>hold reason</dt><dd>{{if .Job.HoldReason}}{{.Job.HoldReason}}{{else}}—{{end}}</dd>
+        <dt>artifacts dir</dt><dd>{{.ArtifactsDir}}</dd>
+        <dt>logs dir</dt><dd>{{.LogsDir}}</dd>
+        <dt>prompts dir</dt><dd>{{.PromptsDir}}</dd>
+      </dl>
+    </div>
 
-<h2>Counters</h2>
-<dl class="facts">
-  <dt>design review rounds</dt><dd>{{.Job.Counters.DesignReviewRounds}}</dd>
-  <dt>code review rounds</dt><dd>{{.Job.Counters.CodeReviewRounds}}</dd>
-  <dt>fix attempts</dt><dd>{{.Job.Counters.FixAttempts}}</dd>
-  <dt>flake retries</dt><dd>{{.Job.Counters.FlakeRetries}}</dd>
-  <dt>agent retries</dt><dd>{{.Job.Counters.AgentRetries}}</dd>
-  <dt>release retries</dt><dd>{{.Job.Counters.ReleaseRetries}}</dd>
-  <dt>agent invocations</dt><dd>{{.Job.Counters.AgentInvocations}}</dd>
-  {{if .Job.Counters.FailedPhase}}<dt>failed phase</dt><dd>{{.Job.Counters.FailedPhase}}</dd>{{end}}
-  {{if .Job.Counters.LastAnalysis}}<dt>last analysis</dt><dd>{{.Job.Counters.LastAnalysis}}</dd>{{end}}
-</dl>
+    <div>
+      <h2 style="margin-top: 0;">Running</h2>
+      {{if .LastProgress}}
+      <p class="meta"><strong>{{.LastProgress.State}}</strong>
+        <time datetime="{{rfc3339 .LastProgress.CreatedAt}}">{{rfc3339 .LastProgress.CreatedAt}}</time></p>
+      <pre>{{.Progress}}</pre>
+      {{else}}
+      <p class="muted">No progress event has been recorded for this job.</p>
+      {{end}}
+    </div>
 
-<h2>Running</h2>
-{{if .LastProgress}}
-<p><strong>{{.LastProgress.State}}</strong>
-  <time datetime="{{rfc3339 .LastProgress.CreatedAt}}">{{rfc3339 .LastProgress.CreatedAt}}</time></p>
-<pre>{{.Progress}}</pre>
-{{else}}
-<p class="muted">No progress event has been recorded for this job.</p>
-{{end}}
+    <div>
+      <h2 style="margin-top: 0;">Issue</h2>
+      <pre>{{.Job.IssueBody}}</pre>
+    </div>
+  </div>
 
-<h2>Elsewhere</h2>
-<ul>
-  {{if .Gate}}<li><a href="/jobs/{{.Job.ID}}/gate">Gate document</a></li>{{end}}
-  <li><a href="/jobs/{{.Job.ID}}/diff">Diff</a> (<a href="/jobs/{{.Job.ID}}/diff.patch">raw patch</a>)</li>
-  <li><a href="/jobs/{{.Job.ID}}/events">Events</a> ({{.Events}})</li>
-  <li><a href="/jobs/{{.Job.ID}}/logs">Logs</a></li>
-  <li><a href="/jobs/{{.Job.ID}}/artifacts">Artifacts</a></li>
-</ul>
+  <div class="side">
+    <div class="card">
+      <div class="card-head">Counters</div>
+      <div class="rows" style="border: 0; border-radius: 0;">
+        <div class="kv" style="grid-template-columns: 1fr auto;">
+          <span class="k">design review rounds</span><span class="v">{{.Job.Counters.DesignReviewRounds}}</span></div>
+        <div class="kv" style="grid-template-columns: 1fr auto;">
+          <span class="k">code review rounds</span><span class="v">{{.Job.Counters.CodeReviewRounds}}</span></div>
+        <div class="kv" style="grid-template-columns: 1fr auto;">
+          <span class="k">fix attempts</span><span class="v">{{.Job.Counters.FixAttempts}}</span></div>
+        <div class="kv" style="grid-template-columns: 1fr auto;">
+          <span class="k">flake retries</span><span class="v">{{.Job.Counters.FlakeRetries}}</span></div>
+        <div class="kv" style="grid-template-columns: 1fr auto;">
+          <span class="k">agent retries</span><span class="v">{{.Job.Counters.AgentRetries}}</span></div>
+        <div class="kv" style="grid-template-columns: 1fr auto;">
+          <span class="k">release retries</span><span class="v">{{.Job.Counters.ReleaseRetries}}</span></div>
+        <div class="kv" style="grid-template-columns: 1fr auto;">
+          <span class="k">agent invocations</span><span class="v">{{.Job.Counters.AgentInvocations}}</span></div>
+        {{if .Job.Counters.FailedPhase}}
+        <div class="kv" style="grid-template-columns: 1fr auto;">
+          <span class="k">failed phase</span><span class="v">{{.Job.Counters.FailedPhase}}</span></div>
+        {{end}}
+        {{if .Job.Counters.LastAnalysis}}
+        <div class="kv" style="grid-template-columns: 1fr auto;">
+          <span class="k">last analysis</span><span class="v">{{.Job.Counters.LastAnalysis}}</span></div>
+        {{end}}
+      </div>
+    </div>
 
-<h2>Issue</h2>
-<pre>{{.Job.IssueBody}}</pre>
+    <div class="card">
+      <div class="card-head">Elsewhere</div>
+      <div class="card-body">
+        <ul style="margin: 0; padding-left: 1.1rem;">
+          {{if .Gate}}<li><a href="/jobs/{{.Job.ID}}/gate">Gate document</a></li>{{end}}
+          <li><a href="/jobs/{{.Job.ID}}/diff">Diff</a> (<a href="/jobs/{{.Job.ID}}/diff.patch">raw patch</a>)</li>
+          <li><a href="/jobs/{{.Job.ID}}/events">Events</a> ({{.Events}})</li>
+          <li><a href="/jobs/{{.Job.ID}}/logs">Logs</a></li>
+          <li><a href="/jobs/{{.Job.ID}}/artifacts">Artifacts</a></li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
 {{end}}
 {{end}}

@@ -334,6 +334,31 @@ CDN, no fonts, no analytics — so it renders on a machine with no network at al
 Config *editing* is not offered anywhere: the file on disk stays the only way to
 change settings.
 
+The gate page is laid out as a review desk rather than a document with a form
+under it. The queue of everything waiting on a human is a rail down the left,
+oldest first, so deciding one gate does not mean going back to the list to find
+the next; the document is in the middle with the pipeline strip above it, so you
+can see which two states the gate sits between; and the decision — the findings,
+the gate facts, the note field and the buttons — is a panel on the right that
+stays put while the document scrolls. A copy of Approve and Request changes sits
+in a bar pinned under the document, so the decision is never more than a glance
+away from the thing being decided.
+
+Two conveniences come with it, and both are conveniences only. Ticking a finding
+off the checklist in the panel is a note to yourself: nothing is posted, and the
+approval row is the same row whether every box is ticked or none is — what it
+buys is a count in the bar, which is the difference between having read four
+findings and having scrolled past them. And `Ctrl-K` (or `Cmd-K`) opens a search
+over the job list that jumps straight to a job, waiting ones first. Neither
+exists without JavaScript, and neither is the only way to do anything.
+
+The job list is one dense grid, split as it always was into "waiting on you" and
+everything else, with a bar per row showing how far through the pipeline the job
+has got. The filter chips above it are ordinary links — `?show=waiting`,
+`?show=failed`, `?show=all` — so a filtered list survives a reload and can be
+pasted to somebody else. The default hides finished and cancelled jobs; `all`
+shows them.
+
 ### What it does not protect against
 
 **There is no authentication of any kind.** No login, no users, no roles, no

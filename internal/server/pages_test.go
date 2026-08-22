@@ -494,8 +494,12 @@ func TestAgentTextIsEscaped(t *testing.T) {
 func TestConfigPageIsReadOnly(t *testing.T) {
 	e := newEnv(t)
 	body := getOK(t, e, "/config")
+	// Scoped to <main>, which is the page. The shared chrome above it carries
+	// a button of its own — the command-palette opener, which is on every page
+	// and edits nothing — and a rule that could not tell the two apart would
+	// be a rule about base.html rather than about this page.
 	for _, bad := range []string{"<form", "<input", "<textarea", "<button"} {
-		if strings.Contains(strings.ToLower(body), bad) {
+		if strings.Contains(strings.ToLower(pageMain(t, body)), bad) {
 			t.Errorf("the config page carries a %s; spec §2.2 refuses config editing in the UI", bad)
 		}
 	}
@@ -506,6 +510,18 @@ func TestConfigPageIsReadOnly(t *testing.T) {
 			t.Errorf("the config page does not show %q", want)
 		}
 	}
+}
+
+// pageMain returns what base.html put inside <main>, which is the part a page
+// owns. Everything outside it is chrome every page shares.
+func pageMain(t *testing.T, body string) string {
+	t.Helper()
+	i := strings.Index(body, "<main")
+	k := strings.Index(body, "</main>")
+	if i < 0 || k < i {
+		t.Fatal("the rendered page has no <main> element")
+	}
+	return body[i:k]
 }
 
 // TestConfigPageRedactsCredentials covers the reason this page needs redaction
