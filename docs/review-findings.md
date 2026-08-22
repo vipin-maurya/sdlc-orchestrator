@@ -53,9 +53,32 @@ before trusting it — including, and especially, when you wrote it yourself.
 | `Split` hung forever on a `Kind` outside the enum | `split.go:34` | `bddc4a1` |
 | The 70% intra-line guard was unpinned — 0.99, 0.35, and a flipped comparison all passed | `split.go:20` | `bddc4a1` |
 | `git diff` ran with the user's prefix config, so `diff.noprefix` mangled every path on that machine alone | `gitx.go:305` | `bddc4a1` |
+| Nothing stopped a **second unconsumed approval** for one job and gate. Both writers check first, but a check is not a constraint, and `PendingApproval` returns the oldest — so the engine consumed one and kept the other for the gate's *next* visit. Every gate is re-enterable, so the spare became a decision nobody made | `store.go:243` | *this commit* |
 
 Each fix carries a test that fails without it, verified by reverting the fix and
 observing the failure.
+
+### The last one, and why it survived a review that was looking for it
+
+The duplicate-approval defect is worth its own paragraph, because the first
+pass over it reported the wrong thing. `notAlreadyPending` was read as covering
+approve and reject; it does, but through `approvalGate` rather than at the call
+site, so a grep for the guard's name finds only `handleResume` and
+`handleCancel` and reads like a gap. The server was never the hole.
+
+The actual hole was in two halves that neither surface owned. `cmdDecision`
+wrote its row with no check at all, so `sdlc reject` typed twice was two rows.
+And the server's check, being a read followed by a separate write, cannot
+refuse a second request that read before the first one wrote. Both halves close
+the same way, and it is not another check: a partial unique index on
+`(job_id, gate) WHERE consumed = 0` is a rule the writers share instead of a
+rule each of them has to remember. The guards stay, because a 409 that names
+the pending decision is a better answer than a constraint violation — but they
+are now the error message, and the index is the guarantee.
+
+The general form: **a check in every writer is not a constraint.** It is a
+constraint minus the two cases nobody tests — the writer added later, and the
+two writers arriving together.
 
 ---
 

@@ -342,3 +342,66 @@ func TestCreateJobHasOneNonTestCaller(t *testing.T) {
 		t.Errorf("store.CreateJob callers = %v, want exactly internal/jobs/submit.go", callers)
 	}
 }
+
+// One pending decision per gate, at the terminal as well as in the browser.
+//
+// `sdlc reject` typed a second time — because the first seemed not to take, or
+// because the operator changed their mind — used to write a second row, and
+// PendingApproval hands the engine the oldest. Every gate here is re-enterable
+// (a rejected spec re-parks at the spec gate), so the spare was consumed on the
+// job's next visit as a decision nobody typed, against a job that had moved on.
+func TestSecondDecisionAtTheSameGateIsRefused(t *testing.T) {
+	e := newReviewEnv(t)
+	j := e.job("AWAITING_SPEC_APPROVAL", "spec is rejected")
+
+	var code int
+	captureStderr(t, func() {
+		code = cmdDecision(e.cfg, []string{j.ID, "--reason", "use the existing FooCache"}, "reject")
+	})
+	if code != 0 {
+		t.Fatalf("the first reject exited %d, want 0", code)
+	}
+
+	stderr := captureStderr(t, func() {
+		code = cmdDecision(e.cfg, []string{j.ID, "--reason", "on second thoughts, cancel it"}, "reject")
+	})
+	if code == 0 {
+		t.Error("the second reject was accepted; the operator now has two answers queued")
+	}
+	// The operator has to be told which decision is in the way, and that the
+	// engine has simply not got to it yet — otherwise the obvious next move is
+	// to type it a third time.
+	for _, want := range []string{"already pending", "next tick", "sdlc review " + j.ID} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr does not mention %q:\n%s", want, stderr)
+		}
+	}
+	// The first answer is the one that survives, unedited.
+	a, err := e.st.PendingApproval(j.ID, "spec")
+	if err != nil || a == nil {
+		t.Fatalf("pending decision: %v %v", a, err)
+	}
+	if a.Reason != "use the existing FooCache" {
+		t.Errorf("pending reason = %q, want the first decision's", a.Reason)
+	}
+}
+
+// The same rule for the control rows, which are written by a different
+// function and so would otherwise need the guard remembered twice.
+func TestSecondControlRequestIsRefused(t *testing.T) {
+	e := newReviewEnv(t)
+	j := e.job("HELD", "held for a human")
+
+	var code int
+	captureStderr(t, func() { code = cmdControl(e.cfg, []string{j.ID}, "cancel") })
+	if code != 0 {
+		t.Fatalf("the first cancel exited %d, want 0", code)
+	}
+	stderr := captureStderr(t, func() { code = cmdControl(e.cfg, []string{j.ID}, "cancel") })
+	if code == 0 {
+		t.Error("the second cancel was accepted")
+	}
+	if !strings.Contains(stderr, "already") {
+		t.Errorf("stderr does not say a cancel is already queued:\n%s", stderr)
+	}
+}

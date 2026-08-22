@@ -10,6 +10,7 @@ package server
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -579,5 +580,52 @@ func TestDiffViewToggleCarriesBothViews(t *testing.T) {
 		if !strings.Contains(out, want) {
 			t.Errorf("the toggle is missing %s:\n%s", want, out)
 		}
+	}
+}
+
+// The race the pre-check cannot win.
+//
+// notAlreadyPending is a read, and record is a separate write, so two requests
+// that arrive together both pass the check and both reach the insert. The
+// database refuses the second (store.ErrDecisionPending), and what matters is
+// how that refusal is reported: nothing is broken, the decision was simply
+// made twice and only the first was kept, so it is the same 409 the pre-check
+// gives — not the 500 an unrecognised store error would produce, which would
+// send the operator to the console looking for a fault that is not there.
+//
+// record is called directly because the two paths are indistinguishable over
+// HTTP: arranging a real race would have the pre-check catch it first.
+func TestConcurrentDecisionIsAConflictNotAnError(t *testing.T) {
+	e := newEnv(t)
+	j := e.job("AWAITING_MERGE_APPROVAL", "two clicks at once")
+
+	if err := e.st.AddApproval(&store.Approval{
+		JobID: j.ID, Gate: "merge", Decision: "approve", Reason: "first",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("POST", "/jobs/"+j.ID+"/approve", nil)
+	e.srv.record(w, r, j, &store.Approval{
+		JobID: j.ID, Gate: "merge", Decision: "approve", Reason: "second",
+	})
+
+	if w.Code != http.StatusConflict {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusConflict)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "already pending") {
+		t.Errorf("body does not say a decision is already pending:\n%s", body)
+	}
+	// And the first decision is still the one waiting, unedited.
+	a, err := e.st.PendingApproval(j.ID, "merge")
+	if err != nil || a == nil {
+		t.Fatalf("pending: %v %v", a, err)
+	}
+	if a.Reason != "first" {
+		t.Errorf("pending reason = %q, want %q", a.Reason, "first")
+	}
+	if rows := e.approvals(); len(rows) != 1 {
+		t.Errorf("%d approval rows, want 1", len(rows))
 	}
 }

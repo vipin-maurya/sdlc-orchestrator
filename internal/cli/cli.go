@@ -448,6 +448,15 @@ func cmdDecision(cfg *config.Config, args []string, decision string) int {
 	}
 	if err := recordDecision(st, &store.Approval{JobID: id, Gate: gate, Decision: decision, Reason: r, Cancel: *cancelFlag}); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		if errors.Is(err, store.ErrDecisionPending) {
+			// Named because the second answer is the one being refused, and an
+			// operator who typed it twice by accident and one who has changed
+			// their mind need different next steps: the first can ignore this,
+			// the second has nothing to undo with and must wait for the tick.
+			fmt.Fprintf(os.Stderr,
+				"  the first decision has not been acted on yet; the engine will take it on its next tick\n"+
+					"  run `sdlc review %s` to see what is already pending\n", id)
+		}
 		return 1
 	}
 	fmt.Printf(decisionRecorded, id, decision, gate)
@@ -473,6 +482,10 @@ func cmdControl(cfg *config.Config, args []string, gate string) int {
 	}
 	if err := recordDecision(st, &store.Approval{JobID: id, Gate: gate, Decision: gate}); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
+		if errors.Is(err, store.ErrDecisionPending) {
+			fmt.Fprintf(os.Stderr,
+				"  a %s is already queued for %s; the engine will act on it on its next tick\n", gate, id)
+		}
 		return 1
 	}
 	fmt.Printf("%s %s requested; the engine will act on its next tick\n", id, gate)

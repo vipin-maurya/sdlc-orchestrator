@@ -7,6 +7,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,12 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// ErrDecisionPending is returned by AddApproval when the job already has an
+// unconsumed row for that gate. Callers test with errors.Is: the CLI answers a
+// usage-level refusal and the server a 409, and neither may match on the
+// driver's own constraint text, which names the schema.
+var ErrDecisionPending = errors.New("a decision is already pending for this job and gate")
 
 type Store struct {
 	db *sql.DB
@@ -209,6 +216,37 @@ func Open(path string, busyTimeout time.Duration) (*Store, error) {
 			return nil, fmt.Errorf("migrate: %s: %w", stmt, err)
 		}
 	}
+	// At most one unconsumed approval per job and gate.
+	//
+	// The check-then-write guards in cli and server are both a read followed by
+	// a separate write, so neither survives two writers arriving together —
+	// and a surplus row is not a harmless duplicate. PendingApproval returns
+	// the oldest, so the engine consumes one and leaves the other unconsumed;
+	// every gate here is re-enterable (a rejected spec re-parks at the spec
+	// gate, a rejected merge comes back round through FIXING), so the leftover
+	// is consumed on the *next* visit as a decision nobody made, against a job
+	// that has moved on since. Only a constraint the writers share can rule
+	// that out, so the guards above are now the good error message and this is
+	// the guarantee.
+	//
+	// The dedupe runs first: a database written before this index can already
+	// hold such a pair, and CREATE UNIQUE INDEX against rows that violate it
+	// fails — which would take Open, and so every command, down with it.
+	// Marking the surplus consumed is what the guard would have done at write
+	// time; the oldest row is the decision, and the rest never should have
+	// existed.
+	for _, stmt := range []string{
+		`UPDATE approvals SET consumed = 1
+		   WHERE consumed = 0 AND id NOT IN (
+		     SELECT MIN(id) FROM approvals WHERE consumed = 0 GROUP BY job_id, gate)`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_pending
+		   ON approvals(job_id, gate) WHERE consumed = 0`,
+	} {
+		if _, err := db.Exec(stmt); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migrate: %s: %w", stmt, err)
+		}
+	}
 	return &Store{db: db}, nil
 }
 
@@ -380,10 +418,29 @@ func (s *Store) AddApproval(a *Approval) error {
 		VALUES (?,?,?,?,?,?,0,?)`,
 		a.JobID, a.Gate, a.Decision, a.Reason, a.Note, boolInt(a.Cancel), fmtTime(a.CreatedAt))
 	if err != nil {
+		// Matched on text because the driver reports the partial index as a
+		// plain constraint failure with no code a caller can switch on. The
+		// job and gate are named here because ErrDecisionPending alone does
+		// not say which decision is in the way, and the caller prints this.
+		if isPendingConflict(err) {
+			return fmt.Errorf("%s %s: %w", a.JobID, a.Gate, ErrDecisionPending)
+		}
 		return err
 	}
 	a.ID, _ = res.LastInsertId()
 	return nil
+}
+
+// isPendingConflict reports whether err is idx_approvals_pending refusing a
+// second unconsumed row. It keys on job_id rather than on the word UNIQUE
+// alone: that index is the only one this table carries beyond the primary key,
+// and a collision on the key itself would be a different failure entirely,
+// which must not be reported to the operator as a pending decision.
+// TestPendingConflictIsRecognised pins the driver's wording so a driver
+// upgrade that rephrases it fails here rather than in production.
+func isPendingConflict(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "UNIQUE constraint failed") && strings.Contains(s, "approvals.job_id")
 }
 
 // PendingApproval returns the oldest unconsumed approval for a job+gate.

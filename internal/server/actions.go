@@ -222,6 +222,17 @@ func (s *Server) notAlreadyPending(w http.ResponseWriter, r *http.Request, j *st
 // reader comparing a handler against cli.cmdDecision is comparing the whole row.
 func (s *Server) record(w http.ResponseWriter, r *http.Request, j *store.Job, a *store.Approval) {
 	if err := s.st.AddApproval(a); err != nil {
+		// notAlreadyPending has already answered this case for every request
+		// that arrived on its own. This is the pair that arrived together —
+		// two clicks on a slow page, or a form reposted while the first was
+		// still in flight — where both reads ran before either write. The
+		// answer is the same 409 rather than a 500: nothing is broken, the
+		// decision was simply made twice and only the first was kept.
+		if errors.Is(err, store.ErrDecisionPending) {
+			s.fail(w, r, http.StatusConflict, fmt.Sprintf(
+				"a %s decision is already pending for %s; the engine will act on its next tick", a.Gate, j.ID))
+			return
+		}
 		s.log.Printf("recording %s for %s: %v", a.Decision, j.ID, err)
 		s.fail(w, r, http.StatusInternalServerError,
 			"the decision could not be recorded — see the sdlc serve console")
