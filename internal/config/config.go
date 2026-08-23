@@ -44,6 +44,7 @@ func (d Duration) String() string { return time.Duration(d).String() }
 // Agent state names. These are the only states that invoke an agent; the
 // full state enum lives in the engine package.
 const (
+	StScoping      = "SCOPING"
 	StPlanning     = "PLANNING"
 	StDesignReview = "DESIGN_REVIEW"
 	StImplementing = "IMPLEMENTING"
@@ -59,7 +60,7 @@ const (
 
 // AgentStates lists every state that must have an entry under `states:`.
 var AgentStates = []string{
-	StPlanning, StDesignReview, StImplementing, StCodeReview,
+	StScoping, StPlanning, StDesignReview, StImplementing, StCodeReview,
 	StAnalyzing, StFixing, StFinalReview, StVerifying,
 }
 
@@ -108,8 +109,11 @@ type Database struct {
 }
 
 type Limits struct {
-	MaxJobDuration            Duration `yaml:"max_job_duration"`
-	MaxDesignReviewRounds     int      `yaml:"max_design_review_rounds"`
+	MaxJobDuration        Duration `yaml:"max_job_duration"`
+	MaxDesignReviewRounds int      `yaml:"max_design_review_rounds"`
+	// MaxScopeRounds caps the human↔agent re-scoping loop. A loop that neither
+	// side ends is worse than a stop, so exhausting it escalates.
+	MaxScopeRounds            int      `yaml:"max_scope_rounds"`
 	MaxCodeReviewRounds       int      `yaml:"max_code_review_rounds"`
 	MaxFixAttempts            int      `yaml:"max_fix_attempts"`
 	MaxFlakeRetries           int      `yaml:"max_flake_retries"`
@@ -225,6 +229,17 @@ type Policies struct {
 	// default: an unattended run should not acquire a new place to stop
 	// because this key exists.
 	HumanGates []string `yaml:"human_gates"`
+	// Scoping is on|off. Off restores the previous pipeline exactly:
+	// CREATED goes straight to PLANNING and no problem.json is produced.
+	Scoping string `yaml:"scoping"`
+}
+
+// ScopingEnabled reports whether the SCOPING state runs. It is a string rather
+// than a bool in YAML to match run_in/push/cleanup_worktrees, and it is read
+// through this method so an invalid value — which Validate rejects — can never
+// read as enabled.
+func (p Policies) ScopingEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(p.Scoping), "on")
 }
 
 // HumanGate reports whether an optional human checkpoint is enabled.
@@ -317,6 +332,7 @@ func Default() *Config {
 		Database: Database{BusyTimeout: Duration(5 * time.Second)},
 		Limits: Limits{
 			MaxJobDuration:            Duration(12 * time.Hour),
+			MaxScopeRounds:            2,
 			MaxDesignReviewRounds:     2,
 			MaxCodeReviewRounds:       3,
 			MaxFixAttempts:            3,
@@ -380,6 +396,12 @@ func Default() *Config {
 		// clean-tree check, and the diff they review is pre-staged by the
 		// orchestrator so Bash is not needed.
 		States: map[string]State{
+			// SCOPING keeps Bash, unlike the reviewers: scoping "Fix 1.0.6
+			// issues" means reading what 1.0.6 actually changed, and git log is
+			// how that is answered. Read-only exploration is the whole job of
+			// this state. It still may not edit the tree — discardTreeChanges
+			// enforces it.
+			StScoping:      {Agent: "opus", Timeout: Duration(15 * time.Minute), DisallowedTools: []string{"Edit", "NotebookEdit"}},
 			StPlanning:     {Agent: "opus", Timeout: Duration(30 * time.Minute)},
 			StDesignReview: {Agent: "sonnet", Timeout: Duration(15 * time.Minute), DisallowedTools: []string{"Edit", "NotebookEdit", "Bash"}},
 			StImplementing: {Agent: "gemini", Timeout: Duration(45 * time.Minute)},
@@ -403,6 +425,7 @@ func Default() *Config {
 			DesignReviewBlocksAt:    "blocker",
 			CodeReviewBlocksAt:      "blocker",
 			FinalReviewBlocksAt:     "blocker",
+			Scoping:                 "on",
 		},
 		Git:    Git{CleanupWorktrees: "on_success"},
 		Server: Server{Listen: defaultListen},
@@ -688,11 +711,19 @@ func (c *Config) Validate() error {
 			fail("policies.%s must be blocker|major|minor|nit, got %q", key, sev)
 		}
 	}
+	switch strings.ToLower(strings.TrimSpace(c.Policies.Scoping)) {
+	case "on", "off":
+	default:
+		fail("policies.scoping must be on|off, got %q", c.Policies.Scoping)
+	}
+	if c.Limits.MaxScopeRounds < 1 {
+		fail("limits.max_scope_rounds must be >= 1")
+	}
 	for _, g := range c.Policies.HumanGates {
 		switch strings.ToLower(strings.TrimSpace(g)) {
-		case "spec", "code", "merge", "release":
+		case "scope", "spec", "code", "merge", "release":
 		default:
-			fail("policies.human_gates: unknown gate %q (spec|code|merge|release)", g)
+			fail("policies.human_gates: unknown gate %q (scope|spec|code|merge|release)", g)
 		}
 	}
 	for name, b := range c.Backends {

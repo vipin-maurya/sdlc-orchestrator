@@ -130,6 +130,18 @@ func (c *jobCtx) findingsJSON(name string) string {
 	return string(b)
 }
 
+// problemJSON returns the harvested problem.json, or "" when there is none.
+// Like findingsJSON it returns a string rather than a struct: the prompt
+// template inlines it verbatim, and a read error is the same as absence here —
+// the section simply does not render.
+func (c *jobCtx) problemJSON() string {
+	b, err := os.ReadFile(filepath.Join(c.artDir(), "problem.json"))
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 // baseCtx builds the prompt context shared by all states.
 func (c *jobCtx) baseCtx() prompt.Ctx {
 	return prompt.Ctx{

@@ -247,6 +247,7 @@ with a reason attached, and every one of them is cleared by hand:
 
 | State | What happened | How it clears |
 |---|---|---|
+| `AWAITING_SCOPE_APPROVAL` | The scoping agent raised a blocking question, or `policies.human_gates` lists `scope` | `sdlc review JOB-1`, or `sdlc approve JOB-1` / `sdlc reject JOB-1 --reason "..."` |
 | `AWAITING_SPEC_APPROVAL` | The spec and plan passed design review, and `policies.human_gates` lists `spec` | `sdlc review JOB-1`, or `sdlc approve JOB-1` / `sdlc reject JOB-1 --reason "..."` |
 | `AWAITING_CODE_APPROVAL` | The implementation passed code review, and `policies.human_gates` lists `code` | `sdlc review JOB-1`, or `sdlc approve JOB-1` / `sdlc reject JOB-1 --reason "..."` |
 | `AWAITING_MERGE_APPROVAL` / `AWAITING_RELEASE_APPROVAL` | Human gate | `sdlc approve JOB-1` / `sdlc reject JOB-1 --reason "..."` |

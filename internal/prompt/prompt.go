@@ -25,6 +25,11 @@ type Ctx struct {
 	IssueTitle string
 	IssueBody  string
 
+	// ScopedProblem is problem.json's content, inlined so the planner is bound
+	// by it without having to be trusted to open the staged file. "" when
+	// policies.scoping is off.
+	ScopedProblem string
+
 	Round     int    // current round/attempt within the loop (1-based)
 	MaxRounds int    // the configured cap for that loop
 	BaseSHA   string // commit before implementation started
@@ -45,6 +50,7 @@ type Ctx struct {
 }
 
 var defaults = map[string]string{
+	config.StScoping:      "scoping.md",
 	config.StPlanning:     "planning.md",
 	config.StDesignReview: "design_review.md",
 	config.StImplementing: "implementing.md",

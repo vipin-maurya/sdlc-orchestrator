@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vipinm/sdlc-orchestrator/internal/agent"
+	"github.com/vipinm/sdlc-orchestrator/internal/artifact"
 	"github.com/vipinm/sdlc-orchestrator/internal/config"
 	"github.com/vipinm/sdlc-orchestrator/internal/gitx"
 	"github.com/vipinm/sdlc-orchestrator/internal/resource"
@@ -300,6 +301,35 @@ func (e *Engine) handleGate(ctx context.Context, j *store.Job) error {
 	_ = e.st.ConsumeApproval(a.ID)
 	e.event(j, "approval", map[string]any{"gate": gate, "decision": a.Decision, "reason": a.Reason})
 	switch {
+	case gate == review.GateScope && a.Decision == "approve":
+		// Approval with questions outstanding is a waiver: planning proceeds on
+		// the recorded assumptions. Naming the waived questions is the point —
+		// a waiver nobody can find later is indistinguishable from a question
+		// that was never asked.
+		if prob, err := artifact.LoadProblem(
+			filepath.Join(artifact.ArtifactsDir(e.cfg.Orchestrator.DataDir, j.ID), "problem.json"),
+		); err == nil {
+			if blocking := prob.BlockingQuestions(); len(blocking) > 0 {
+				ids := make([]string, 0, len(blocking))
+				for _, q := range blocking {
+					ids = append(ids, q.ID)
+				}
+				e.event(j, "note", map[string]any{"scope_questions_waived": ids})
+			}
+		}
+		e.transition(j, SPlanning, "scope approved")
+	case gate == review.GateScope && a.Decision == "reject":
+		if a.Cancel {
+			e.transition(j, SCancelled, "scope rejected (cancelled): "+a.Reason)
+			e.cleanup(ctx, j)
+		} else {
+			// Unlike the spec gate, this counter IS spent on a human decision:
+			// re-scoping is a conversation between the operator and the agent,
+			// and max_scope_rounds is what stops it running forever.
+			j.Counters.ScopeRounds++
+			j.Counters.HumanRejectReason = a.Reason
+			e.transition(j, SScoping, "scope rejected: "+a.Reason)
+		}
 	case gate == review.GateSpec && a.Decision == "approve":
 		e.transition(j, SImplementing, "spec approved")
 	case gate == review.GateSpec && a.Decision == "reject":
@@ -397,6 +427,8 @@ func (e *Engine) step(ctx context.Context, j *store.Job) {
 	switch j.State {
 	case SCreated:
 		next, herr = jc.handleCreated(ctx)
+	case SScoping:
+		next, herr = jc.handleScoping(ctx)
 	case SPlanning:
 		next, herr = jc.handlePlanning(ctx)
 	case SDesignReview:

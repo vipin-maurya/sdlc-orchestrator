@@ -326,11 +326,13 @@ func statusOne(cfg *config.Config, st *store.Store, id string) int {
 		fmt.Printf("  resumes:   %s\n", j.ResumeAfter.Local().Format(time.RFC3339))
 	}
 	c := j.Counters
-	fmt.Printf("  counters:  design_review=%d code_review=%d fixes=%d flake=%d release=%d agent_invocations=%d\n",
-		c.DesignReviewRounds, c.CodeReviewRounds, c.FixAttempts, c.FlakeRetries, c.ReleaseRetries, c.AgentInvocations)
+	fmt.Printf("  counters:  scope_rounds=%d design_review=%d code_review=%d fixes=%d flake=%d release=%d agent_invocations=%d\n",
+		c.ScopeRounds, c.DesignReviewRounds, c.CodeReviewRounds, c.FixAttempts, c.FlakeRetries, c.ReleaseRetries, c.AgentInvocations)
 	fmt.Printf("  artifacts: %s\n", artifact.ArtifactsDir(cfg.Orchestrator.DataDir, j.ID))
 	printLastProgress(st, j)
 	switch j.State {
+	case engine.SAwaitScope:
+		fmt.Println("\n  ACTION NEEDED: approve the scoped problem before a spec is written")
 	case engine.SAwaitSpec:
 		fmt.Println("\n  ACTION NEEDED: approve the spec and plan before any code is written")
 	case engine.SAwaitCode:

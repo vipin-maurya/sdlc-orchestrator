@@ -72,6 +72,39 @@ func runFakeAgent(promptFile string) int {
 	// heuristics below would claim it.
 	case strings.Contains(prompt, "verification agent"):
 		return runFakeVerifier(prompt)
+	case strings.Contains(prompt, "scoping agent"):
+		clarity := os.Getenv("FAKE_SCOPE_CLARITY")
+		if clarity == "" {
+			clarity = "clear"
+		}
+		// FAKE_SCOPE_BLOCK_ONCE blocks the first attempt only, so a test can
+		// drive block -> reject -> re-scope -> clear. It uses the marker-file
+		// trick FAKE_DESIGN_BLOCK_ONCE already uses: the fake is a fresh
+		// process each invocation and has nowhere else to remember.
+		if os.Getenv("FAKE_SCOPE_BLOCK_ONCE") != "" {
+			marker := filepath.Join(os.Getenv("FAKE_MARKER_DIR"), "scoped-once")
+			if _, err := os.Stat(marker); err != nil {
+				_ = os.WriteFile(marker, []byte("1"), 0o644)
+				clarity = "blocked"
+			} else {
+				clarity = "clear"
+			}
+		}
+		questions, assumptions := "[]", "[]"
+		switch clarity {
+		case "blocked":
+			questions = `[{"id":"Q1","question":"which parser?","why_it_matters":"different work","blocking":true}]`
+		case "assumed":
+			assumptions = `[{"assumption":"only the SMS path","basis":"NotificationParser has its own regex"}]`
+		}
+		if os.Getenv("FAKE_SCOPE_EDIT") != "" {
+			_ = os.WriteFile("src/app.txt", []byte("scoped\n"), 0o644)
+		}
+		writeOut("problem.json", fmt.Sprintf(`{"schema":"problem/1",
+			"problem_statement":"the parser drops amounts with a non-breaking space",
+			"in_scope":["the SMS amount parser"],"out_of_scope":["the notification parser"],
+			"success_criteria":["U+00A0 before the amount parses like a plain space"],
+			"assumptions":%s,"open_questions":%s,"clarity":%q}`, assumptions, questions, clarity))
 	case strings.Contains(prompt, "planning agent"):
 		// FAKE_PLAN_REQUIRE_CONTEXT: a re-plan driven by a human rejection must
 		// be handed the spec and plan it is revising. Without them the planner
@@ -590,8 +623,8 @@ func TestQuotaSuspendsAndResumes(t *testing.T) {
 	if got.State != SBlockedQuota {
 		t.Fatalf("state=%s, want BLOCKED_ON_QUOTA; hold=%q", got.State, got.HoldReason)
 	}
-	if got.PrevState != SPlanning {
-		t.Errorf("prev_state=%s, want PLANNING", got.PrevState)
+	if got.PrevState != SScoping {
+		t.Errorf("prev_state=%s, want SCOPING", got.PrevState)
 	}
 	if got.Counters.FixAttempts != 0 || got.Counters.AgentRetries != 0 {
 		t.Error("quota hit must not consume retry budgets")
@@ -1364,5 +1397,251 @@ func TestStateBaselineIsCapturedOnceAndClearedOnTransition(t *testing.T) {
 	if got.Counters.StateEntryHead != "" {
 		t.Errorf("StateEntryHead=%q, want it cleared by the transition out of the state",
 			got.Counters.StateEntryHead)
+	}
+}
+
+// The default path: a clear problem statement goes straight to planning, and
+// the artifact is harvested where every later state and the gate document
+// expect to find it.
+func TestScopingClearGoesToPlanning(t *testing.T) {
+	e := newEnv(t)
+	j := e.submit("non-breaking space in SMS amounts")
+
+	e.runEngine()
+
+	if got := e.jobState(j.ID); got.State != SAwaitMerge {
+		t.Fatalf("state=%s hold=%q", got.State, got.HoldReason)
+	}
+	if !e.artifactExists(j.ID, "problem.json") {
+		t.Error("problem.json was not harvested")
+	}
+	if n := len(e.promptsFor(j.ID, SScoping)); n != 1 {
+		t.Errorf("SCOPING dispatched %d time(s), want 1", n)
+	}
+}
+
+// A blocking question stops the job at the gate, not in the ESCALATED hold: a
+// vague ticket is an expected outcome and belongs in the approve/reject
+// surface the operator already uses.
+func TestScopingBlockedParksAtTheGate(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_SCOPE_CLARITY", "blocked")
+	j := e.submit("fix the thing")
+
+	e.runEngine()
+
+	got := e.jobState(j.ID)
+	if got.State != SAwaitScope {
+		t.Fatalf("state=%s hold=%q, want %s", got.State, got.HoldReason, SAwaitScope)
+	}
+	if n := len(e.promptsFor(j.ID, SPlanning)); n != 0 {
+		t.Errorf("PLANNING ran %d time(s) before the scope was settled", n)
+	}
+}
+
+// The policy gate parks a perfectly clear problem statement too, for an
+// operator who wants to check every one.
+func TestScopingPolicyGateParksAClearProblem(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.Policies.HumanGates = []string{"scope"}
+	j := e.submit("non-breaking space in SMS amounts")
+
+	e.runEngine()
+
+	if got := e.jobState(j.ID); got.State != SAwaitScope {
+		t.Fatalf("state=%s, want %s", got.State, SAwaitScope)
+	}
+}
+
+// policies.scoping: off must reproduce the pre-feature pipeline exactly.
+func TestScopingOffSkipsTheState(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.Policies.Scoping = "off"
+	j := e.submit("non-breaking space in SMS amounts")
+
+	e.runEngine()
+
+	if got := e.jobState(j.ID); got.State != SAwaitMerge {
+		t.Fatalf("state=%s hold=%q", got.State, got.HoldReason)
+	}
+	if n := len(e.promptsFor(j.ID, SScoping)); n != 0 {
+		t.Errorf("SCOPING ran %d time(s) with scoping off", n)
+	}
+	if e.artifactExists(j.ID, "problem.json") {
+		t.Error("problem.json exists with scoping off")
+	}
+}
+
+// A loop between a human and an agent that neither side ends is worse than a
+// stop, so the round cap escalates rather than dispatching the agent again.
+func TestScopeRoundCapEscalates(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.Limits.MaxScopeRounds = 1
+	j := e.submit("fix the thing")
+	j.Counters.ScopeRounds = 1
+	j.State = SScoping
+	if err := e.st.UpdateJob(j); err != nil {
+		t.Fatal(err)
+	}
+
+	e.runEngine()
+
+	got := e.jobState(j.ID)
+	if got.State != SEscalated {
+		t.Fatalf("state=%s, want %s", got.State, SEscalated)
+	}
+	if !strings.Contains(got.HoldReason, "scope") {
+		t.Errorf("hold reason does not name the scope loop: %q", got.HoldReason)
+	}
+	if n := len(e.promptsFor(j.ID, SScoping)); n != 0 {
+		t.Errorf("the agent ran %d time(s) with the budget already spent", n)
+	}
+}
+
+// Like the planner and the reviewers, the scoping agent must leave the tree
+// clean; a source edit is discarded rather than carried into planning.
+func TestScopingDiscardsTreeEdits(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_SCOPE_EDIT", "1")
+	j := e.submit("non-breaking space in SMS amounts")
+
+	e.runEngine()
+
+	wt := filepath.Join(e.repo, ".worktrees", j.ID)
+	if out := git(t, wt, "status", "--porcelain"); strings.Contains(out, "src/app.txt") {
+		t.Errorf("scoping left an edit in the tree: %q", out)
+	}
+}
+
+// Approving with questions outstanding is a waiver, and a waiver that leaves
+// no trace is the silent decision this pipeline exists to prevent.
+func TestScopeApprovalWaivesOpenQuestions(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_SCOPE_CLARITY", "blocked")
+	j := e.submit("fix the thing")
+	e.runEngine()
+	if got := e.jobState(j.ID); got.State != SAwaitScope {
+		t.Fatalf("state=%s, want %s", got.State, SAwaitScope)
+	}
+
+	if err := e.st.AddApproval(&store.Approval{JobID: j.ID, Gate: "scope", Decision: "approve"}); err != nil {
+		t.Fatal(err)
+	}
+	// The agent would block again on a second scoping run; approval must not
+	// send it back there.
+	t.Setenv("FAKE_SCOPE_CLARITY", "clear")
+	e.runEngine()
+
+	got := e.jobState(j.ID)
+	if got.State == SAwaitScope || got.State == SScoping {
+		t.Fatalf("approval did not move the job past scoping: state=%s", got.State)
+	}
+	if n := len(e.promptsFor(j.ID, SScoping)); n != 1 {
+		t.Errorf("SCOPING ran %d time(s); approval must not re-scope", n)
+	}
+	if d := e.eventDetails(j.ID); !strings.Contains(d, "scope_questions_waived") || !strings.Contains(d, "Q1") {
+		t.Error("the waived questions were not recorded in the event log")
+	}
+}
+
+// Rejection carries the operator's answers back into a fresh scoping round.
+func TestScopeRejectionRescopesWithTheAnswers(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_MARKER_DIR", t.TempDir())
+	t.Setenv("FAKE_SCOPE_BLOCK_ONCE", "1")
+	j := e.submit("fix the thing")
+	e.runEngine()
+	if got := e.jobState(j.ID); got.State != SAwaitScope {
+		t.Fatalf("state=%s, want %s", got.State, SAwaitScope)
+	}
+
+	const answer = "Q1: only the SMS parser."
+	if err := e.st.AddApproval(&store.Approval{
+		JobID: j.ID, Gate: "scope", Decision: "reject", Reason: answer,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.runEngine()
+
+	got := e.jobState(j.ID)
+	if got.Counters.ScopeRounds != 1 {
+		t.Errorf("scope_rounds=%d, want 1", got.Counters.ScopeRounds)
+	}
+	if got.Counters.HumanRejectReason != "" {
+		t.Error("the rejection reason was not cleared after the round consumed it")
+	}
+	prompts := e.promptsFor(j.ID, SScoping)
+	if len(prompts) != 2 {
+		t.Fatalf("SCOPING ran %d time(s), want 2", len(prompts))
+	}
+	if !strings.Contains(prompts[1], answer) {
+		t.Errorf("the second scoping prompt does not carry the answers:\n%s", prompts[1])
+	}
+	if got.State == SAwaitScope || got.State == SScoping {
+		t.Errorf("the re-scoped job did not move on: state=%s", got.State)
+	}
+}
+
+// --cancel at the scope gate ends the job, as it does at the spec gate.
+func TestScopeRejectionWithCancelEndsTheJob(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_SCOPE_CLARITY", "blocked")
+	j := e.submit("fix the thing")
+	e.runEngine()
+
+	if err := e.st.AddApproval(&store.Approval{
+		JobID: j.ID, Gate: "scope", Decision: "reject", Reason: "not worth doing", Cancel: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.runEngine()
+
+	if got := e.jobState(j.ID); got.State != SCancelled {
+		t.Fatalf("state=%s, want %s", got.State, SCancelled)
+	}
+}
+
+// Planning and design review receive problem.json in .sdlc/context, but only
+// when scoping ran: with scoping off there is nothing to stage and the context
+// directory must not carry a stale problem from a prior run.
+func TestProblemContextIsStagedForPlanningAndDesignReview(t *testing.T) {
+	e := newEnv(t)
+	j := e.submit("fix SMS parser")
+
+	e.runEngine()
+
+	// The engine ran through to the merge gate, so planning and design review
+	// both executed. Assert the artifact exists in the job's artifact store:
+	if !e.artifactExists(j.ID, "problem.json") {
+		t.Fatal("problem.json not in artifacts")
+	}
+
+	// Verify the planning prompt inlined the scoped problem:
+	prompts := e.promptsFor(j.ID, SPlanning)
+	if len(prompts) == 0 {
+		t.Fatal("no planning prompts found")
+	}
+	if !strings.Contains(prompts[0], "# Scoped problem") || !strings.Contains(prompts[0], "problem/1") {
+		t.Errorf("planning prompt does not inline problem.json:\n%s", prompts[0])
+	}
+}
+
+func TestProblemContextOmittedWhenScopingDisabled(t *testing.T) {
+	e := newEnv(t)
+	e.cfg.Policies.Scoping = "off"
+	j := e.submit("fix SMS parser")
+
+	e.runEngine()
+
+	if e.artifactExists(j.ID, "problem.json") {
+		t.Fatal("problem.json must not exist in artifacts when scoping is off")
+	}
+
+	prompts := e.promptsFor(j.ID, SPlanning)
+	if len(prompts) == 0 {
+		t.Fatal("no planning prompts found")
+	}
+	if strings.Contains(prompts[0], "# Scoped problem") {
+		t.Errorf("planning prompt must not contain '# Scoped problem' when scoping is off:\n%s", prompts[0])
 	}
 }

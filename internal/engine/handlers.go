@@ -42,6 +42,76 @@ func (c *jobCtx) handleCreated(ctx context.Context) (string, error) {
 	if err := c.e.st.UpdateJob(c.job); err != nil {
 		return "", err
 	}
+	if !c.e.cfg.Policies.ScopingEnabled() {
+		return SPlanning, nil
+	}
+	return SScoping, nil
+}
+
+// --- SCOPING -------------------------------------------------------------
+
+func (c *jobCtx) handleScoping(ctx context.Context) (string, error) {
+	// Check the budget before dispatching, not after: an agent invocation
+	// spent on a round that can never be accepted is pure cost.
+	if c.job.Counters.ScopeRounds >= c.e.cfg.Limits.MaxScopeRounds {
+		return "", escalate("scope still unresolved after %d round(s); see problem.json and the gate history",
+			c.job.Counters.ScopeRounds)
+	}
+	if err := c.resetExchange(); err != nil {
+		return "", err
+	}
+	pctx := c.baseCtx()
+	pctx.Round = c.job.Counters.ScopeRounds + 1
+	pctx.MaxRounds = c.e.cfg.Limits.MaxScopeRounds
+	rejected := c.job.Counters.HumanRejectReason
+	// Stage the previous statement whenever there is one to revise. Keying this
+	// on the counter alone would send the agent back in with nothing to answer
+	// and it would write a new statement from scratch — the same trap
+	// handlePlanning documents.
+	if c.job.Counters.ScopeRounds > 0 || rejected != "" {
+		c.stageArtifact("problem.json")
+	}
+	pctx.RejectReason = rejected
+	problemPath := filepath.Join(c.sdlcDir(), "problem.json")
+	err := c.runAgent(ctx, SScoping, pctx, func() error {
+		if _, err := artifact.LoadProblem(problemPath); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	if _, err := c.harvest("problem.json", "problem.json"); err != nil {
+		return "", err
+	}
+	prob, err := artifact.LoadProblem(filepath.Join(c.artDir(), "problem.json"))
+	if err != nil {
+		return "", err
+	}
+	// The objection applied to this one attempt.
+	c.job.Counters.HumanRejectReason = ""
+	c.discardTreeChanges(ctx) // scoping must not leave code edits behind
+
+	if blocking := prob.BlockingQuestions(); len(blocking) > 0 {
+		ids := make([]string, 0, len(blocking))
+		for _, q := range blocking {
+			ids = append(ids, q.ID)
+		}
+		c.e.event(c.job, "note", map[string]any{
+			"awaiting_scope_approval": true, "reason": "agent_blocked",
+			"blocking_questions": ids, "problem_statement": prob.ProblemStatement,
+		})
+		return SAwaitScope, nil
+	}
+	if c.e.cfg.Policies.HumanGate("scope") {
+		c.e.event(c.job, "note", map[string]any{
+			"awaiting_scope_approval": true, "reason": "policy_gate",
+			"clarity": prob.Clarity, "assumptions": len(prob.Assumptions),
+			"problem_statement": prob.ProblemStatement,
+		})
+		return SAwaitScope, nil
+	}
 	return SPlanning, nil
 }
 
@@ -52,9 +122,12 @@ func (c *jobCtx) handlePlanning(ctx context.Context) (string, error) {
 		return "", err
 	}
 	pctx := c.baseCtx()
+	pctx.ScopedProblem = c.problemJSON()
 	pctx.Round = c.job.Counters.DesignReviewRounds + 1
 	pctx.MaxRounds = c.e.cfg.Limits.MaxDesignReviewRounds
 	rejected := c.job.Counters.HumanRejectReason
+	// Stage the scoped problem statement whenever one exists.
+	c.stageArtifact("problem.json")
 	// A human rejection does not increment DesignReviewRounds — that counter
 	// budgets automated rework — so staging on the counter alone would send
 	// the planner back in with nothing to revise, and it would write a new
@@ -101,9 +174,12 @@ func (c *jobCtx) handleDesignReview(ctx context.Context) (string, error) {
 	if err := c.resetExchange(); err != nil {
 		return "", err
 	}
+	// Stage the scoped problem so the reviewer can check the spec against it.
+	c.stageArtifact("problem.json")
 	c.stageArtifact("spec.json")
 	c.stageArtifact("plan.json")
 	pctx := c.baseCtx()
+	pctx.ScopedProblem = c.problemJSON()
 	pctx.Round = round
 	pctx.MaxRounds = c.e.cfg.Limits.MaxDesignReviewRounds
 	reviewPath := filepath.Join(c.sdlcDir(), "review.json")

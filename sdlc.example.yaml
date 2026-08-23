@@ -29,6 +29,7 @@ orchestrator:
 
 limits:
   max_job_duration: 12h         # wall clock from submit; then TIMED_OUT
+  max_scope_rounds: 2           # scoping iteration cap; then ESCALATED
   max_design_review_rounds: 2   # spec/plan rejection loop cap
   max_code_review_rounds: 3
   max_fix_attempts: 3           # shared fix budget across all fix loops
@@ -107,6 +108,7 @@ agents:
 # the orchestrator. CODE_REVIEW and FINAL_REVIEW must run on a different
 # backend than IMPLEMENTING (asserted at startup).
 states:
+  SCOPING:       { agent: opus,   timeout: 15m, disallowed_tools: [Edit, NotebookEdit] }
   PLANNING:      { agent: opus,   timeout: 30m }
   DESIGN_REVIEW: { agent: sonnet, timeout: 15m, disallowed_tools: [Edit, NotebookEdit, Bash] }
   IMPLEMENTING:  { agent: gemini, timeout: 45m }
@@ -127,6 +129,7 @@ states:
   # embedded default template for that state).
 
 policies:
+  scoping: "on"                 # on | off (reproduces pre-feature CREATED -> PLANNING)
   protected_branches: [main, master]
   # Lowest finding severity that stops the pipeline at each review gate:
   # blocker | major | minor | nit. Findings below the threshold never block but
@@ -137,10 +140,11 @@ policies:
   design_review_blocks_at: major
   code_review_blocks_at: blocker
   final_review_blocks_at: blocker
-  # Optional earlier stops: `spec` after design review passes and before any
-  # code is written, `code` after code review passes and before build and
-  # test. Merge and release are always enforced; this key only adds stops.
-  # human_gates: [spec, code]
+  # Optional earlier stops: `scope` after scoping completes, `spec` after
+  # design review passes and before any code is written, `code` after code
+  # review passes and before build and test. Merge and release are always
+  # enforced; this key only adds stops.
+  # human_gates: [scope, spec, code]
   protect_tests_on_code_bug_fix: true   # FIXING may not touch tests when the failure was a code bug
   test_file_globs:
     - "**/src/test/**"

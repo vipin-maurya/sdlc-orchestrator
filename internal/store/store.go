@@ -29,6 +29,10 @@ type Store struct {
 
 // Counters are the independent per-loop budgets (SPEC §3.3).
 type Counters struct {
+	// ScopeRounds counts SCOPING attempts a human sent back. Like
+	// DesignReviewRounds it increments only on rejection, so it is 0 for a
+	// scoping accepted first time. omitempty keeps pre-feature rows readable.
+	ScopeRounds        int `json:"scope_rounds,omitempty"`
 	DesignReviewRounds int `json:"design_review_rounds"`
 	CodeReviewRounds   int `json:"code_review_rounds"`
 	FixAttempts        int `json:"fix_attempts"`
