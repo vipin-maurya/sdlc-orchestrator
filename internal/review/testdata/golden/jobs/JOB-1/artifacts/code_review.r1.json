@@ -1,0 +1,14 @@
+{
+  "schema": "review/1",
+  "reviewed": "diff",
+  "summary": "ROUND 1 SUMMARY — this text must never reach a gate document; round 2 supersedes it.",
+  "findings": [
+    {
+      "id": "CR1-1",
+      "severity": "major",
+      "file": "internal/execx/redact.go",
+      "description": "Redaction is applied per call site rather than in the capture path.",
+      "recommendation": "Move it into the capture path."
+    }
+  ]
+}

@@ -21,6 +21,9 @@ Runs on **Windows, macOS, and Linux**, against any repo you can describe in
 
 - **Spec:** [`docs/SPEC.md`](docs/SPEC.md) — normative; this repo implements it
 - **Operating it:** [`docs/running.md`](docs/running.md)
+- **Known gaps:** [`docs/review-findings.md`](docs/review-findings.md) — what an audit of the current build found, fixed and still open
+- **The web UI:** [`docs/running.md`](docs/running.md) §8 — running `sdlc serve`, and what it deliberately does not protect against
+- **Server and UI internals:** [`docs/server-spec.md`](docs/server-spec.md) and [`docs/server-plan.md`](docs/server-plan.md) — the design and the build order for `sdlc serve`
 - **Shipping the result:** [autoship](https://github.com/vipinm/autoship), which
   the `RELEASING` state invokes
 
@@ -95,6 +98,7 @@ covered end to end in [`docs/running.md`](docs/running.md).
 ```
 sdlc submit    --target <key> --title "..." (--body "..." | --file issue.md)
 sdlc run       [--once]                 start the engine (foreground)
+sdlc serve     [--addr host:port] [--v] local web UI (loopback only, no auth)
 sdlc status    [JOB-ID]                 list jobs / show one job in detail
 sdlc approve   <JOB-ID> [--note "..."]  approve the pending merge/release gate
 sdlc reject    <JOB-ID> --reason "..." [--cancel]
@@ -107,6 +111,19 @@ sdlc version
 ```
 
 `--config` is global and precedes the subcommand; `SDLC_CONFIG` sets it once.
+
+## The web UI
+
+`sdlc serve` is a small web UI over the same database: the job list, the gate
+document with its approve/reject form, the diff, the events, the logs, the
+prompts as sent, and a read-only config page. It writes exactly the rows the
+CLI writes, so the browser and the terminal are interchangeable, and everything
+it serves is embedded in the binary — it renders with no network at all. It is
+**localhost-only and has no authentication of any kind**: anyone who can reach
+the port can approve a merge and read every artifact. It binds a loopback
+address and refuses anything else; to use it from another machine, forward the
+port (`ssh -L 7777:127.0.0.1:7777 host`). The full list of what it does and does
+not defend against is in [`docs/running.md`](docs/running.md) §8.
 
 ## What the orchestrator enforces (not the prompts)
 
@@ -142,12 +159,18 @@ internal/
   execx/              streaming command runner
   resource/           gradle slots + device pool + emulator boot
   guard/              test-file globs, policy checks
+  jobs/               the one submit path, shared by the CLI and the UI
+  review/             the gate document both surfaces render
+  diff/               unified-diff parser + side-by-side view
+  server/             `sdlc serve`: the local web UI
   artifact/           spec/plan/review/analysis JSON schemas
   prompt/             template rendering + hashing
 prompts/              embedded default per-state prompts
 scripts/              supervisor install scripts (Task Scheduler / launchd / systemd)
 docs/SPEC.md          the specification this repo implements
 docs/running.md       installing, validating, and running it unattended
+docs/review-findings.md  audit of the current build: fixed, open, and verified
+docs/server-spec.md   the web UI's design; docs/server-plan.md its build order
 ```
 
 ## Three things worth knowing before changing it

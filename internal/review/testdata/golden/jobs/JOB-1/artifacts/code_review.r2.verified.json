@@ -1,0 +1,58 @@
+{
+  "schema": "review/1",
+  "reviewed": "diff",
+  "summary": "Round 2 after verification: the compile-per-call finding survived, the ordering claim did not, and two advisory findings stand unvoted.",
+  "findings": [
+    {
+      "id": "CR-1",
+      "severity": "major",
+      "file": "internal/execx/redact.go",
+      "description": "The pattern table is compiled on every captured line, so a long build pays the compile cost once per line of output.",
+      "recommendation": "Compile the table once when the config loads and hand the compiled form to the capture path.",
+      "verification": {
+        "votes": 3,
+        "confirmed": 2,
+        "refuted": 1,
+        "min_confirm": 2,
+        "survived": true,
+        "original_severity": "major"
+      }
+    },
+    {
+      "id": "CR-2",
+      "severity": "nit",
+      "file": "internal/execx/execx.go",
+      "description": "Claimed that redaction runs before the line is split, so a token spanning a chunk boundary escapes.",
+      "recommendation": "None: the verifiers read the capture loop and found the split happens first.",
+      "verification": {
+        "votes": 3,
+        "confirmed": 0,
+        "refuted": 3,
+        "min_confirm": 2,
+        "survived": false,
+        "original_severity": "blocker",
+        "verdicts": [
+          {
+            "schema": "verdict/1",
+            "finding_id": "CR-2",
+            "verdict": "refuted",
+            "evidence": "execx.go:212 splits on '\\n' before calling redact.Line; the residue is carried in the scanner buffer.",
+            "reasoning": "A token spanning a chunk boundary is therefore redacted on the line it completes, so the claimed escape cannot happen."
+          }
+        ]
+      }
+    },
+    {
+      "id": "CR-3",
+      "severity": "major",
+      "file": "internal/server/render.go",
+      "description": "A finding's description is interpolated with `template.HTML`, so a review that says <script>alert('xss')</script> executes in the reviewer's browser instead of being read.",
+      "recommendation": "Interpolate as a plain string and let html/template escape it; there is no context here that needs raw HTML."
+    },
+    {
+      "id": "CR-4",
+      "severity": "nit",
+      "description": "No test covers the case where the pattern table is empty, which is the shipped default."
+    }
+  ]
+}

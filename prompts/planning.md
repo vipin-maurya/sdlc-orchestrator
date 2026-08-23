@@ -16,6 +16,17 @@ spec and plan are available at `.sdlc/context/spec.json` and `.sdlc/context/plan
 ```json
 {{.PrevFindings}}
 ```
+{{end}}{{if .RejectReason}}
+# A human rejected the previous spec and plan
+
+The previous spec and plan are at `.sdlc/context/spec.json` and `.sdlc/context/plan.json`.
+A human read them and rejected them with this reason:
+
+> {{.RejectReason}}
+
+This is an instruction, not a suggestion, and it takes precedence over the previous approach.
+Revise the spec and plan so the objection no longer applies, and say in `approach` what you
+changed in response. Do not restate the previous approach in new wording.
 {{end}}
 
 # Your task

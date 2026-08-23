@@ -9,6 +9,19 @@ orchestrator:
   poll_interval: 3s             # engine tick for CLI-driven changes
   job_id_prefix: JOB            # job ids look like JOB-12
   # lock_file: <data_dir>/engine.lock
+  # A state that invokes an agent is opaque for as long as the agent takes —
+  # PLANNING routinely runs twelve minutes. These two make it legible: each
+  # action the agent takes is echoed as it happens (when the backend streams;
+  # see backends.claude.stream_json), and a heartbeat says the state is still
+  # alive even when the backend prints nothing until it exits. Progress is
+  # recorded as job events either way, so `sdlc status` shows the current
+  # state's last action and `sdlc logs JOB --last` tails a log that is still
+  # being written.
+  stream_output: true           # echo agent actions to the engine console
+  heartbeat_interval: 60s       # 0 disables the "still running" line
+  # An open gate waits on a person, so the console has to keep saying so: the
+  # engine announces it when the job parks and re-announces it this often.
+  gate_reminder_interval: 10m   # 0 announces each gate once and never repeats
 
 # database:
 #   path: <data_dir>/sdlc.db
@@ -60,6 +73,12 @@ backends:
     permission_mode: bypassPermissions   # safe: agents only run inside job worktrees
     quota_backoff: 30m            # BLOCKED_ON_QUOTA suspension on rate limits
     # expected_version: "2.1.0"   # non-empty => sdlc validate warns on drift
+    # Ask the CLI for --output-format stream-json (plus --verbose, which that
+    # format requires) so each tool call is visible while the state runs
+    # instead of nothing until it exits. Off by default because it changes the
+    # invocation; turn it on once you have confirmed your claude build accepts
+    # the combination.
+    stream_json: false
   agy:
     binary: C:\Users\vm899\AppData\Local\agy\bin\agy.exe
     default_timeout: 30m
@@ -118,6 +137,10 @@ policies:
   design_review_blocks_at: major
   code_review_blocks_at: blocker
   final_review_blocks_at: blocker
+  # Optional earlier stops: `spec` after design review passes and before any
+  # code is written, `code` after code review passes and before build and
+  # test. Merge and release are always enforced; this key only adds stops.
+  # human_gates: [spec, code]
   protect_tests_on_code_bug_fix: true   # FIXING may not touch tests when the failure was a code bug
   test_file_globs:
     - "**/src/test/**"
@@ -129,6 +152,16 @@ policies:
 git:
   cleanup_worktrees: on_success  # on_success | always | never
   delete_branch_on_success: false
+
+# server:
+#   listen: 127.0.0.1:7777      # sdlc serve binds here. Loopback only: there
+#                               # is no authentication, so a routable address
+#                               # would publish an approve button on the
+#                               # network. Remote use goes through
+#                               # ssh -L 7777:127.0.0.1:7777 host
+#   # The IPv6 loopback must be quoted. Written bare, listen: [::1]:7777 is a
+#   # YAML flow sequence, not a string, and the file fails to parse:
+#   listen: "[::1]:7777"
 
 targets:
   expensetracker:

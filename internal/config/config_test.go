@@ -123,3 +123,236 @@ func TestDurationParsing(t *testing.T) {
 		t.Error("invalid duration accepted")
 	}
 }
+
+// human_gates is a hand-written list in a YAML file, so "Spec", "SPEC" and a
+// stray space around it all have to name the same checkpoint. A config that
+// quietly means "no gate" because somebody capitalised a word is a config that
+// stops nothing, and the operator only finds out when the job merges itself.
+func TestHumanGateMatching(t *testing.T) {
+	cases := []struct {
+		name  string
+		gates []string
+		probe string
+		want  bool
+	}{
+		{"exact match", []string{"spec"}, "spec", true},
+		{"upper case in the config", []string{"SPEC"}, "spec", true},
+		{"mixed case in the config", []string{"Code"}, "code", true},
+		{"whitespace around the entry", []string{"  spec  "}, "spec", true},
+		{"one of several entries", []string{"merge", "code", "release"}, "code", true},
+		{"a different gate is listed", []string{"code"}, "spec", false},
+		{"nothing is listed", nil, "spec", false},
+		{"empty slice is not a wildcard", []string{}, "code", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := Policies{HumanGates: tc.gates}
+			if got := p.HumanGate(tc.probe); got != tc.want {
+				t.Errorf("Policies{HumanGates: %q}.HumanGate(%q) = %v, want %v",
+					tc.gates, tc.probe, got, tc.want)
+			}
+		})
+	}
+}
+
+// The two gates the pipeline can reach must both come back on, and neither
+// must switch the other on: `human_gates: [spec]` stopping a job before build
+// as well would be a config that does more than it says.
+func TestHumanGatesAreIndependent(t *testing.T) {
+	cfg, err := load(t, minimalTarget+"policies:\n  human_gates: [spec]\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Policies.HumanGate("spec") {
+		t.Error("human_gates: [spec] did not enable the spec gate")
+	}
+	if cfg.Policies.HumanGate("code") {
+		t.Error("human_gates: [spec] enabled the code gate as well")
+	}
+}
+
+// An unknown gate name is a typo, and a typo that loads is a checkpoint the
+// operator believes in and never gets.
+func TestUnknownHumanGateRejected(t *testing.T) {
+	_, err := load(t, minimalTarget+"policies:\n  human_gates: [speck]\n")
+	if err == nil || !strings.Contains(err.Error(), "unknown gate") {
+		t.Errorf("human_gates: [speck] was accepted: %v", err)
+	}
+}
+
+func TestDefaultServerListen(t *testing.T) {
+	if got := Default().Server.Listen; got != "127.0.0.1:7777" {
+		t.Errorf("default server.listen = %q, want 127.0.0.1:7777", got)
+	}
+	// A config file that says nothing about the server must still come out of
+	// Load bound to loopback rather than to nothing at all.
+	cfg, err := load(t, minimalTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.Listen != "127.0.0.1:7777" {
+		t.Errorf("loaded server.listen = %q, want 127.0.0.1:7777", cfg.Server.Listen)
+	}
+	if _, err := load(t, minimalTarget+"server:\n  listen: 127.0.0.1:9999\n"); err != nil {
+		t.Errorf("an explicit loopback listen was rejected: %v", err)
+	}
+}
+
+// The server has no authentication, so the bind address is the whole of its
+// access control: a routable one publishes an approve button to everything that
+// can route to this machine. The rule is checked here rather than at bind time
+// because `sdlc serve --addr` and the config key must answer it identically,
+// and the message has to name the way out (ssh -L) or the operator's next move
+// is to widen the bind until it works.
+func TestListenMustBeLoopback(t *testing.T) {
+	cases := []struct {
+		name          string
+		addr          string
+		allowPortZero bool
+		wantErr       bool
+	}{
+		{name: "IPv4 loopback", addr: "127.0.0.1:7777"},
+		{name: "the name an operator types", addr: "localhost:7777"},
+		{name: "IPv6 loopback", addr: "[::1]:7777"},
+		{name: "any interface", addr: "0.0.0.0:7777", wantErr: true},
+		{name: "no host at all", addr: ":7777", wantErr: true},
+		{name: "a name that is not localhost", addr: "example.com:7777", wantErr: true},
+		{name: "a routable IPv4", addr: "192.168.1.10:7777", wantErr: true},
+		{name: "no port", addr: "127.0.0.1", wantErr: true},
+		{name: "ephemeral port in a config file", addr: "127.0.0.1:0", wantErr: true},
+		{name: "ephemeral port from --addr", addr: "127.0.0.1:0", allowPortZero: true},
+		{name: "port out of range", addr: "127.0.0.1:99999", wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateListen(tc.addr, tc.allowPortZero)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("ValidateListen(%q, %v) = %v, wantErr %v", tc.addr, tc.allowPortZero, err, tc.wantErr)
+			}
+		})
+	}
+
+	// The refusal has to teach the fix, not just refuse.
+	err := ValidateListen("0.0.0.0:7777", false)
+	if err == nil {
+		t.Fatal("0.0.0.0:7777 was accepted")
+	}
+	for _, want := range []string{"loopback", "ssh -L"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message %q does not mention %q", err, want)
+		}
+	}
+}
+
+// The config key goes through the same rule as the flag, and a rejected address
+// must fail the load rather than surface when the port is already open.
+func TestNonLoopbackListenFailsLoad(t *testing.T) {
+	_, err := load(t, minimalTarget+"server:\n  listen: 0.0.0.0:7777\n")
+	if err == nil || !strings.Contains(err.Error(), "server.listen") {
+		t.Errorf("0.0.0.0 in the config file was accepted: %v", err)
+	}
+}
+
+// The carve-out this replaces accepted the literal string "localhost" and
+// returned it to be bound as-is, which trusts /etc/hosts: a machine that maps
+// localhost to a routable address would have passed validation and then bound
+// that address. Normalizing to the literal that gets bound closes the gap
+// without a lookup, so the assertion is on the returned string, not on nil.
+func TestNormalizeListenNeverTrustsAHostname(t *testing.T) {
+	got, err := NormalizeListen("localhost:7777", false)
+	if err != nil {
+		t.Fatalf("NormalizeListen(localhost:7777) = %v", err)
+	}
+	if got != "127.0.0.1:7777" {
+		t.Fatalf("NormalizeListen(localhost:7777) = %q, want 127.0.0.1:7777 — the bound string must be an IP literal", got)
+	}
+	// Every other name is refused outright rather than resolved, including the
+	// ones that look local.
+	for _, addr := range []string{"localhost.localdomain:7777", "LOCALHOST:7777", "example.com:7777", "myhost:7777"} {
+		if got, err := NormalizeListen(addr, false); err == nil {
+			t.Errorf("NormalizeListen(%q) = %q, want a refusal: a name is not an address", addr, got)
+		}
+	}
+}
+
+// Whatever a caller binds has to be the string this function returned, so the
+// returned string has to be a valid listen address for every accepted input.
+func TestNormalizeListenReturnsABindableAddress(t *testing.T) {
+	for _, tc := range []struct{ addr, want string }{
+		{"127.0.0.1:7777", "127.0.0.1:7777"},
+		{"localhost:7777", "127.0.0.1:7777"},
+		{"[::1]:7777", "[::1]:7777"},
+		{"127.0.0.2:7777", "127.0.0.2:7777"},
+	} {
+		got, err := NormalizeListen(tc.addr, false)
+		if err != nil {
+			t.Errorf("NormalizeListen(%q) = %v", tc.addr, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("NormalizeListen(%q) = %q, want %q", tc.addr, got, tc.want)
+		}
+	}
+	// Port 0 is only reachable through --addr, and the caller binds it too.
+	if got, err := NormalizeListen("localhost:0", true); err != nil || got != "127.0.0.1:0" {
+		t.Errorf("NormalizeListen(localhost:0, true) = %q, %v; want 127.0.0.1:0", got, err)
+	}
+}
+
+// Every refusal on this path has to tell the operator what to do instead, and
+// the empty value is the one whose answer is "delete the line".
+func TestEmptyListenSaysHowToFixIt(t *testing.T) {
+	err := ValidateListen("", false)
+	if err == nil {
+		t.Fatal("an empty listen was accepted")
+	}
+	for _, want := range []string{"delete the key", defaultListen, "ssh -L"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message %q does not mention %q", err, want)
+		}
+	}
+	if strings.Contains(err.Error(), "missing port in address") {
+		t.Errorf("empty listen reported as a malformed host:port: %v", err)
+	}
+}
+
+// Atoi accepted a sign and leading zeros, so "+7777" and "0007777" named a port
+// nobody wrote. The set of accepted ports is exactly the decimal numbers 1-65535
+// (plus 0 for --addr).
+func TestListenPortAcceptsOnlyPlainDecimal(t *testing.T) {
+	for _, addr := range []string{
+		"127.0.0.1:+7777",
+		"127.0.0.1:07777",
+		"127.0.0.1:0007777",
+		"127.0.0.1:-1",
+		"127.0.0.1:7777x",
+		"127.0.0.1:0x1e61",
+		"127.0.0.1: 7777",
+	} {
+		if got, err := NormalizeListen(addr, false); err == nil {
+			t.Errorf("NormalizeListen(%q) = %q, want a refusal", addr, got)
+		}
+	}
+	if _, err := NormalizeListen("127.0.0.1:7777", false); err != nil {
+		t.Errorf("a plain decimal port was refused: %v", err)
+	}
+	// The range still has to be named: "65536" is the number an operator most
+	// often reaches for, and the message is the only place the bound appears.
+	err := ValidateListen("127.0.0.1:65536", false)
+	if err == nil {
+		t.Fatal("port 65536 was accepted")
+	}
+	if !strings.Contains(err.Error(), "1-65535") {
+		t.Errorf("out-of-range message %q does not name the range", err)
+	}
+	if err := ValidateListen("127.0.0.1:65535", false); err != nil {
+		t.Errorf("port 65535 was refused: %v", err)
+	}
+	// allowPortZero still means what it meant.
+	if err := ValidateListen("127.0.0.1:0", true); err != nil {
+		t.Errorf("port 0 with allowPortZero was refused: %v", err)
+	}
+	if err := ValidateListen("127.0.0.1:0", false); err == nil {
+		t.Error("port 0 was accepted in a config file")
+	}
+}

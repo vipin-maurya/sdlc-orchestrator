@@ -1,0 +1,10 @@
+diff --git a/keep.txt b/keep.txt
+index 4a58007..f8704fb 100644
+--- a/keep.txt
++++ b/keep.txt
+@@ -1 +1,2 @@
+ alpha
++bravo
+diff --git a/logo.png b/logo.png
+index 95e0be1..61e07b1 100644
+Binary files a/logo.png and b/logo.png differ

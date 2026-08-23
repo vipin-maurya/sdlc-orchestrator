@@ -1,0 +1,12 @@
+diff --git a/filler.txt b/filler.txt
+index 1111111..2222222 100644
+--- a/filler.txt
++++ b/filler.txt
+@@ -1,4 +1,6 @@
+ head
+-gone
++added one
++added two
+ mid
++pure insertion
+ tail

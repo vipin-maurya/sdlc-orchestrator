@@ -1,0 +1,310 @@
+{{/* The gate document as a page. Owner: W2-J.
+
+     This file is the second renderer over review's block model; the first is
+     markdownBlock in internal/review/blocks.go, and the two draw the same tree.
+     All of the markup lives here rather than in render.go because markup built
+     in Go has to be handed to html/template as pre-escaped, and a pre-escaped
+     finding description an agent wrote is how a reviewer's browser ends up
+     running an implementer's payload (spec §7.4). Everything below is
+     plain interpolation, so every string on this page is escaped.
+
+     "gateBlock" is the browser's markdownBlock: one branch per
+     review.BlockKind, and a final branch that says so in the page when a kind
+     has none. TestEveryBlockKindRenders executes this template for every kind
+     in review.AllBlockKinds, so a branch missing here fails the suite instead
+     of dropping a section out of a merge document.
+
+     The three-pane shell around it is the Review Dashboard design, and each
+     pane earns its place: the queue on the left is why this page can be the
+     only one an operator keeps open, and the panel on the right is the
+     decision, kept on screen while the document scrolls past it. The document
+     in the middle is unchanged — it is the same block tree the CLI prints. */}}
+
+{{define "content"}}
+{{with .Body}}
+{{if .Waiting}}
+
+{{/* --- left: the queue ------------------------------------------------- */}}
+<aside class="rail">
+  <div class="rail-head">
+    <span>Waiting on you</span>
+    {{if .Queue}}<span class="count">{{len .Queue}}</span>{{end}}
+    <span class="hint">oldest first</span>
+  </div>
+  <div class="rail-body">
+    {{range .Queue}}
+    {{/* The row for the job being decided is marked rather than un-linked: it
+         still navigates, so a mis-click costs a reload and not a lost place. */}}
+    <a class="qrow{{if eq .Job.ID $.Body.Job.ID}} on{{end}}" href="/jobs/{{.Job.ID}}/gate">
+      <span class="line">
+        <span class="id">{{.Job.ID}}</span>
+        <span class="gatepill {{.GateClass}}">{{.Gate}}</span>
+        <span class="age"><time datetime="{{rfc3339 .Job.StateEnteredAt}}">{{rfc3339 .Job.StateEnteredAt}}</time></span>
+      </span>
+      <span class="what">{{.Job.IssueTitle}}</span>
+      <span class="sub">{{.Job.Target}} · {{.Job.State}}</span>
+    </a>
+    {{else}}
+    <p class="muted" style="padding: .85rem;">Nothing else is waiting.</p>
+    {{end}}
+
+    {{if .Running}}
+    <div class="running">
+      <div class="eyebrow">Running</div>
+      {{range .Running}}
+      <a class="rrow state {{.StateClass}}" href="/jobs/{{.Job.ID}}">
+        <span class="dot"></span>
+        <span class="id">{{.Job.ID}}</span>
+        <span class="st">{{.Job.State}}</span>
+        <span class="age"><time datetime="{{rfc3339 .Job.StateEnteredAt}}">{{rfc3339 .Job.StateEnteredAt}}</time></span>
+      </a>
+      {{end}}
+    </div>
+    {{end}}
+  </div>
+</aside>
+
+{{/* --- centre: the document -------------------------------------------- */}}
+<section class="centre">
+  <div class="doc-head">
+    <div class="meta">
+      <strong>{{.Job.ID}}</strong>
+      <span class="gatepill {{gateClass .Gate}}">{{.Gate}} gate</span>
+      <span>waiting <time datetime="{{rfc3339 .Job.StateEnteredAt}}">{{rfc3339 .Job.StateEnteredAt}}</time></span>
+    </div>
+    <h1>{{if .Title}}{{.Title}}{{else}}{{.Job.IssueTitle}}{{end}}</h1>
+    <div class="meta" style="margin-top: .5rem;">
+      <strong>{{.Job.Branch}}</strong>
+      <span>&rarr;</span>
+      <strong>{{.Job.Target}}</strong>
+      {{/* Guarded: a job that has not committed yet has no head, and "· on"
+           with nothing either side of it reads as a rendering fault rather
+           than as an absent value. */}}
+      {{if .Job.HeadSHA}}<span>·</span>
+      <span>{{short .Job.HeadSHA}}{{if .Job.Counters.BaseSHA}} on {{short .Job.Counters.BaseSHA}}{{end}}</span>{{end}}
+    </div>
+
+    <div class="pipeline" style="margin-top: .9rem;">
+      {{range .Pipeline}}<span class="phase {{.Class}}">{{.Label}}</span>{{end}}
+    </div>
+
+    {{/* Tabs are links to pages that exist, not panes this one hides. Each is
+         a real URL an operator can open in a second window beside the
+         document, which is how a diff actually gets read. */}}
+    <div class="tabs">
+      <a class="on" href="/jobs/{{.Job.ID}}/gate">Document</a>
+      {{if .HasDiff}}<a href="/jobs/{{.Job.ID}}/diff">Files changed</a>{{end}}
+      <a href="/jobs/{{.Job.ID}}/events">Events</a>
+      <a href="/jobs/{{.Job.ID}}/logs">Logs</a>
+      <a href="/jobs/{{.Job.ID}}/artifacts">Artifacts</a>
+      <a href="/jobs/{{.Job.ID}}">Job</a>
+    </div>
+  </div>
+
+  <div class="doc-body">
+    {{/* A2: the reader is told which of the two documents they have before they
+         read a word of it. A reviewer who cannot tell a live render from a
+         snapshot cannot tell whether the thing they are approving is what is on
+         disk. */}}
+    {{if eq .Source "live"}}
+    <p class="note ok" data-doc-source="live">Rendered live from the job&#39;s worktree
+    just now — this is current state, not the copy saved when the job parked.</p>
+    {{else}}
+    <p class="note warn" data-doc-source="persisted">This is a <strong>saved
+    snapshot</strong>, not a live render: the gate document could not be rendered
+    from the worktree, so what follows is the copy written when the job parked, read
+    from <code>{{.SourcePath}}</code>. It may not describe the worktree as it stands
+    now.</p>
+    {{end}}
+
+    <article class="doc" style="margin-top: 1rem;">
+    {{range .Blocks}}{{template "gateBlock" .}}{{end}}
+    </article>
+
+    <p class="muted" style="margin-top: 1.5rem;">
+      <a href="/jobs/{{.Job.ID}}">Job {{.Job.ID}}</a>
+      {{if .HasDiff}}· <a href="/jobs/{{.Job.ID}}/diff">Read the diff</a>
+      · <a href="/jobs/{{.Job.ID}}/diff.patch">Raw patch</a>{{end}}
+    </p>
+
+    {{template "decisionBar" .Form}}
+  </div>
+</section>
+
+{{/* --- right: the decision --------------------------------------------- */}}
+<aside class="panel">
+  <div class="panel-head">
+    <div class="t">Decision</div>
+    <div class="s">{{.Gate}} gate · recorded exactly as the CLI records it</div>
+  </div>
+  <div class="panel-body">
+    {{if .Findings}}
+    <div>
+      <div class="eyebrow" style="margin-bottom: .55rem;">Findings checklist</div>
+      {{/* Ticking a box is a note to yourself and nothing else: it is never
+           posted, and the approval row is the same row whether every box is
+           ticked or none is. What it buys is the count in the bar below the
+           document, which is the difference between having read four findings
+           and having scrolled past them. */}}
+      <div class="rows" id="triage">
+        {{range .Findings}}
+        <label class="check">
+          <input type="checkbox">
+          <span class="body">
+            <span class="head">
+              <span class="badge {{.SevClass}}">{{.Severity}}</span>
+              {{if .File}}<span class="file">{{.File}}</span>{{end}}
+            </span>
+            <span class="what">{{.Description}}</span>
+          </span>
+        </label>
+        {{end}}
+      </div>
+    </div>
+    {{end}}
+
+    <div>
+      <div class="eyebrow" style="margin-bottom: .55rem;">Gate facts</div>
+      <dl class="facts">
+        {{range .Facts}}<dt>{{.K}}</dt><dd>{{if .V}}{{.V}}{{else}}—{{end}}</dd>{{end}}
+      </dl>
+    </div>
+
+    {{/* Both forms are W2-I's, invoked and never redefined. decisionForm draws
+         nothing at the hold gate — a held job is cleared with resume or cancel,
+         not approve or reject — so the two are not alternatives. */}}
+    {{if eq .Gate "hold"}}{{template "holdForm" .Form}}{{else}}{{template "decisionForm" .Form}}{{end}}
+  </div>
+</aside>
+
+{{else}}
+<h1>{{with .Job}}{{.ID}}{{end}}</h1>
+{{/* review.Render's own sentence, carried through rather than rewritten, so
+     asking the browser about a job nobody is waiting on reads exactly like
+     asking the CLI. */}}
+<p>{{.Message}}</p>
+<p><a href="/jobs">Back to the job list</a>{{with .Job}} · <a href="/jobs/{{.ID}}">Job {{.ID}}</a>{{end}}</p>
+{{end}}
+{{end}}
+{{end}}
+
+{{/* --- one block ------------------------------------------------------- */}}
+
+{{define "gateBlock"}}
+{{- if not .Handled}}
+{{/* Visible, never silent. A document short one section looks exactly like a
+     document that had nothing to say, which is the failure the block model
+     exists to prevent. */}}
+<p class="err">unrenderable block: {{.Kind}}</p>
+{{- else if eq .Kind "heading"}}
+{{/* Level is clamped to 1..6 by render.go. Level 1 is the document title every
+     gate opens with; it is not a level the page may skip. */}}
+{{- if eq .Level 1}}<h1>{{.Text}}</h1>
+{{- else if eq .Level 2}}<h2>{{.Text}}</h2>
+{{- else if eq .Level 3}}<h3>{{.Text}}</h3>
+{{- else if eq .Level 4}}<h4>{{.Text}}</h4>
+{{- else if eq .Level 5}}<h5>{{.Text}}</h5>
+{{- else}}<h6>{{.Text}}</h6>{{end}}
+{{- else if eq .Kind "paragraph"}}
+<p>{{range .Spans}}{{template "gateSpan" .}}{{end}}</p>
+{{- else if eq .Kind "facts"}}
+<dl class="facts">
+{{- range .Facts}}
+  <dt>{{.Label}}</dt>
+  <dd>{{.Value}}{{if .Note}} <span class="muted">({{.Note}})</span>{{end}}</dd>
+{{- end}}
+</dl>
+{{- else if eq .Kind "bullets"}}
+<ul>
+{{- range .Items}}
+  <li>{{range .Spans}}{{template "gateSpan" .}}{{end}}
+  {{- if .Sub}}
+    <ul>{{range .Sub}}<li>{{range .}}{{template "gateSpan" .}}{{end}}</li>{{end}}</ul>
+  {{- end}}</li>
+{{- end}}
+</ul>
+{{- else if eq .Kind "quote"}}
+{{/* One <p> per blank-line-separated paragraph, lines joined with <br>: HTML
+     collapses newlines, and an issue body that arrived as a list would
+     otherwise be served back as one run-on line. */}}
+<blockquote>
+{{- range .Quote}}
+  <p>{{range $i, $line := .Lines}}{{if $i}}<br>{{end}}{{$line}}{{end}}</p>
+{{- end}}
+{{- if .Truncated}}
+  <p class="muted">(truncated)</p>
+{{- end}}
+</blockquote>
+{{- else if eq .Kind "code"}}
+{{/* No whitespace inside the tags: <pre> preserves every byte, and the hold
+     table's column padding is bytes the document means to have. */}}
+<pre class="{{.CodeClass}}">{{.Text}}</pre>
+{{- else if eq .Kind "findings"}}
+<ul class="findings">
+{{- range .Findings}}
+  <li>
+    <span class="{{.SevClass}}">{{.Severity}}</span>
+    {{if .File}}<code>{{.File}}</code>{{end}}
+    {{.Description}}
+    {{- if or .Recommendation .Verified}}
+    <ul>
+      {{if .Recommendation}}<li>recommendation: {{.Recommendation}}</li>{{end}}
+      {{if .Verified}}<li class="muted">verifiers: {{.Verdict}} {{.Confirmed}}/{{.Votes}} (was {{.OriginalSeverity}})</li>{{end}}
+    </ul>
+    {{- end}}
+  </li>
+{{- end}}
+</ul>
+{{- else if eq .Kind "steps"}}
+<ul class="steps">
+{{- range .Steps}}
+  <li><strong>{{.ID}}</strong> {{.Description}}
+  {{- if or .Files .Verification}}
+    <ul>
+      {{if .Files}}<li>files: {{range $i, $f := .Files}}{{if $i}}, {{end}}<code>{{$f}}</code>{{end}}</li>{{end}}
+      {{if .Verification}}<li>verify: <code>{{.Verification}}</code></li>{{end}}
+    </ul>
+  {{- end}}</li>
+{{- end}}
+</ul>
+{{- else if eq .Kind "actions"}}
+{{/* The outcome list is drawn only when there is an outcome, mirroring the
+     markdown separator: a gate this package does not know about has commands
+     and no outcomes, and an empty list styled as one is a section that looks
+     broken rather than absent. */}}
+{{- if .Actions}}
+<ul class="actions">
+{{- range .Actions}}
+  <li><strong>{{.Decision}}</strong> → {{range .Effect}}{{template "gateSpan" .}}{{end}}</li>
+{{- end}}
+</ul>
+{{- end}}
+<pre class="code">{{range .Commands}}{{.}}
+{{end}}</pre>
+{{- else}}
+<p class="err">unrenderable block: {{.Kind}}</p>
+{{- end}}
+{{end}}
+
+{{/* --- one inline span -------------------------------------------------- */}}
+
+{{define "gateSpan"}}
+{{- if not .Handled}}<em class="err">unrenderable {{.Kind}} span: {{.Text}}</em>
+{{- else if eq .Kind "text"}}{{.Text}}
+{{- else if eq .Kind "strong"}}<strong>{{template "spanBody" .}}</strong>
+{{- else if eq .Kind "emphasis"}}<em>{{template "spanBody" .}}</em>
+{{- else if eq .Kind "code"}}<code>{{.Text}}</code>
+{{- else if eq .Kind "path"}}<code class="path">{{.Text}}</code>
+{{- else}}<em class="err">unrenderable {{.Kind}} span: {{.Text}}</em>
+{{- end}}
+{{- end}}
+
+{{/* spanBody prints a span's own text, or recurses into the spans it wraps.
+     Emphasis around inline code is the one nesting the document uses: without
+     it, _source: `x`_ reaches the browser as literal grave accents inside
+     italics, where a reader expects monospace. */}}
+{{define "spanBody"}}
+{{- if .Children}}{{range .Children}}{{template "gateSpan" .}}{{end}}
+{{- else}}{{.Text}}
+{{- end}}
+{{- end}}

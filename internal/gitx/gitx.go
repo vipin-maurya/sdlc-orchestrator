@@ -295,22 +295,29 @@ func (r Repo) DiffNamesSince(ctx context.Context, dir, sha string) ([]string, er
 	return files, nil
 }
 
-// DiffPatchSince returns the full unified diff between sha and the worktree
-// (bounded to ~4MB). Staged for reviewers so they never need shell access.
-func (r Repo) DiffPatchSince(ctx context.Context, dir, sha string) (string, error) {
+// DiffPatchSince returns the full unified diff between sha and the worktree,
+// and whether the 4 MiB capture cap cut it short. The flag is returned rather
+// than left for the caller to infer from the length: a patch that is exactly
+// the cap and a patch that overran it are the same string.
+func (r Repo) DiffPatchSince(ctx context.Context, dir, sha string) (patch string, truncated bool, err error) {
 	res, out, err := execx.RunCapture(ctx, execx.Cmd{
-		Argv:           []string{"git", "diff", sha},
+		// The prefixes are pinned rather than left to the user's git config.
+		// internal/diff reads `diff --git a/x b/x` and strips the a/ b/; with
+		// diff.noprefix or diff.mnemonicPrefix set in ~/.gitconfig the header
+		// says something else and every path in the review comes out mangled,
+		// silently and only on that person's machine.
+		Argv:           []string{"git", "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "diff", "--src-prefix=a/", "--dst-prefix=b/", sha},
 		Dir:            dir,
 		Timeout:        gitTimeout,
 		StderrSeparate: true, // reviewers read this patch; keep warnings out of it
 	}, 4<<20)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if res.ExitCode != 0 {
-		return "", fmt.Errorf("git diff %s (exit %d): %s", sha, res.ExitCode, strings.TrimSpace(out))
+		return "", false, fmt.Errorf("git diff %s (exit %d): %s", sha, res.ExitCode, strings.TrimSpace(out))
 	}
-	return out, nil
+	return out, res.Truncated, nil
 }
 
 // DiffStatSince renders a human diff stat between sha and HEAD for approval

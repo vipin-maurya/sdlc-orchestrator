@@ -6,6 +6,7 @@ package engine
 // real models.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
@@ -16,6 +17,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -71,6 +73,19 @@ func runFakeAgent(promptFile string) int {
 	case strings.Contains(prompt, "verification agent"):
 		return runFakeVerifier(prompt)
 	case strings.Contains(prompt, "planning agent"):
+		// FAKE_PLAN_REQUIRE_CONTEXT: a re-plan driven by a human rejection must
+		// be handed the spec and plan it is revising. Without them the planner
+		// writes a new spec from scratch instead of answering the objection,
+		// and the staging condition that guarantees this is easy to narrow by
+		// accident — it keys off a counter a human "no" never increments.
+		if os.Getenv("FAKE_PLAN_REQUIRE_CONTEXT") == "1" && strings.Contains(prompt, "A human rejected") {
+			for _, n := range []string{"spec.json", "plan.json"} {
+				if _, err := os.Stat(filepath.Join(".sdlc", "context", n)); err != nil {
+					fmt.Fprintf(os.Stderr, "fakeagent: context/%s not staged for the re-plan: %v\n", n, err)
+					return 1
+				}
+			}
+		}
 		writeOut("spec.json", `{"schema":"spec/1","issue_summary":"demo","approach":"edit app.txt",
 			"affected_files":["src/app.txt"],"acceptance_criteria":["app.txt updated"],
 			"error_paths":[],"out_of_scope":[],"compatibility_concerns":[]}`)
@@ -139,6 +154,23 @@ func runFakeAgent(promptFile string) int {
 				writeOut("implementation.json", `{"schema":"implementation/1","summary":""}`)
 				return 0
 			}
+			writeOut("implementation.json", impl)
+			return 0
+		}
+		// FAKE_IMPL_STEPS: finish two steps a moment apart, reporting each to
+		// .sdlc/progress.jsonl as a real implementer is asked to. The pauses
+		// are what let the orchestrator's watcher commit them separately;
+		// without separate commits the checkpointing is not doing anything.
+		if os.Getenv("FAKE_IMPL_STEPS") == "1" {
+			// Stream a couple of actions first, in the shape a streaming
+			// backend emits them.
+			fmt.Println(`{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Edit","input":{"file_path":"src/app.txt"}}]}}`)
+			appendFile("src/app.txt", "step one work")
+			appendFile(filepath.Join(".sdlc", "progress.jsonl"), `{"step":"S1","summary":"did step one"}`)
+			time.Sleep(800 * time.Millisecond)
+			appendFile("src/app.txt", "step two work")
+			appendFile(filepath.Join(".sdlc", "progress.jsonl"), `{"step":"S2","summary":"did step two"}`)
+			time.Sleep(800 * time.Millisecond)
 			writeOut("implementation.json", impl)
 			return 0
 		}
@@ -362,6 +394,43 @@ func (e *env) runEngine() {
 	if err := eng.Run(ctx, true); err != nil {
 		e.t.Fatalf("engine: %v", err)
 	}
+}
+
+// syncBuf is a log destination the race detector tolerates. The engine logs
+// from tick *and* from every step goroutine, so a bare bytes.Buffer behind
+// log.Logger is not enough: log.Logger serialises its own writes, but the test
+// then reads the buffer from a third goroutine while a step is still finishing.
+type syncBuf struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuf) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuf) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
+}
+
+// runEngineLogged is runEngine with the console captured. The gate
+// announcements are the console, so a test that asserts on them has to read
+// what an operator would have seen rather than what the database ended up
+// holding.
+func (e *env) runEngineLogged() string {
+	e.t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	buf := &syncBuf{}
+	eng := New(e.cfg, e.st, log.New(buf, "", 0))
+	if err := eng.Run(ctx, true); err != nil {
+		e.t.Fatalf("engine: %v", err)
+	}
+	return buf.String()
 }
 
 func (e *env) jobState(id string) *store.Job {
@@ -830,11 +899,11 @@ func TestRetryPromptDescribesWorktree(t *testing.T) {
 	retry := prompts[1]
 	for _, want := range []string{
 		"retry 2 of",
-		"summary (non-empty",          // the actual post-condition failure, quoted
+		"summary (non-empty",                     // the actual post-condition failure, quoted
 		"keys actually present: schema, summary", // and what the file did contain
-		"already modified 1 file(s)",  // counted from the real worktree diff
-		"- src/app.txt",               // the file the failed attempt edited
-		"`.sdlc/implementation.json`", // the output it left behind
+		"already modified 1 file(s)",             // counted from the real worktree diff
+		"- src/app.txt",                          // the file the failed attempt edited
+		"`.sdlc/implementation.json`",            // the output it left behind
 	} {
 		if !strings.Contains(retry, want) {
 			t.Errorf("retry prompt missing %q\n---\n%s", want, retry)
@@ -1154,5 +1223,146 @@ func TestEscalatedStateWorkIsCommitted(t *testing.T) {
 	}
 	if !strings.Contains(e.eventDetails(j.ID), "preserved_incomplete_work") {
 		t.Error("preservation not recorded in the event log")
+	}
+}
+
+// --- observability and checkpointing -------------------------------------
+
+// A state that produces code must land in the branch step by step. One commit
+// per state means a long implementation is all-or-nothing: JOB-1's 13-minute,
+// 22-file IMPLEMENTING run was discarded whole over a malformed output file.
+func TestPlanStepsAreCheckpointedAsTheyComplete(t *testing.T) {
+	old := checkpointPollInterval
+	checkpointPollInterval = 50 * time.Millisecond
+	t.Cleanup(func() { checkpointPollInterval = old })
+
+	e := newEnv(t)
+	t.Setenv("FAKE_IMPL_STEPS", "1")
+	j := e.submit("checkpointed implementation")
+
+	e.runEngine()
+	if got := e.jobState(j.ID); got.State != SAwaitMerge {
+		t.Fatalf("state=%s hold=%q", got.State, got.HoldReason)
+	}
+	wt := filepath.Join(e.repo, ".worktrees", j.ID)
+	logOut := git(t, wt, "log", "--oneline")
+	for _, want := range []string{"IMPLEMENTING checkpoint S1", "IMPLEMENTING checkpoint S2"} {
+		if !strings.Contains(logOut, want) {
+			t.Errorf("missing %q in:\n%s", want, logOut)
+		}
+	}
+	// Two separate commits is the whole claim: if the watcher only drained at
+	// the end, the second step would find a clean tree and commit nothing.
+	if n := strings.Count(logOut, "IMPLEMENTING checkpoint"); n != 2 {
+		t.Errorf("want 2 checkpoint commits, got %d:\n%s", n, logOut)
+	}
+	details := e.eventDetails(j.ID)
+	if !strings.Contains(details, `"checkpoint":"S1"`) {
+		t.Errorf("checkpoint not recorded as a progress event:\n%s", details)
+	}
+}
+
+// The engine used to log only at transitions, so a state in flight and a hung
+// one were indistinguishable. Every agent state must announce that it started
+// and report what the agent is doing.
+func TestAgentActionsBecomeProgressEvents(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_IMPL_STEPS", "1")
+	j := e.submit("streamed progress")
+
+	e.runEngine()
+	details := e.eventDetails(j.ID)
+	if !strings.Contains(details, `"started":true`) {
+		t.Errorf("no state-start progress event:\n%s", details)
+	}
+	if !strings.Contains(details, "Edit src/app.txt") {
+		t.Errorf("agent action not condensed into a progress event:\n%s", details)
+	}
+}
+
+// The agent log has to be readable while the agent is still running: it is the
+// only window `sdlc logs JOB --last` has into a state that has been going for
+// ten minutes.
+func TestAgentLogIsWrittenDuringTheRun(t *testing.T) {
+	e := newEnv(t)
+	t.Setenv("FAKE_IMPL_STEPS", "1")
+	j := e.submit("live log")
+
+	e.runEngine()
+	logsDir := filepath.Join(e.cfg.Orchestrator.DataDir, "jobs", j.ID, "logs")
+	ents, err := os.ReadDir(logsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var implLog string
+	for _, ent := range ents {
+		if strings.Contains(ent.Name(), "IMPLEMENTING") {
+			implLog = filepath.Join(logsDir, ent.Name())
+		}
+	}
+	if implLog == "" {
+		t.Fatalf("no IMPLEMENTING log in %s", logsDir)
+	}
+	data, err := os.ReadFile(implLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "tool_use") {
+		t.Errorf("agent stdout did not reach the log file:\n%s", data)
+	}
+}
+
+// Checkpoints survive a restart, so a re-run of IMPLEMENTING starts against a
+// tree that already holds part of its own work. The agent must be told: a
+// first-attempt prompt against a half-finished tree is what makes an agent
+// redo completed work on top of itself.
+func TestInterruptedStateTellsTheAgentWhatIsAlreadyDone(t *testing.T) {
+	e := newEnv(t)
+	j := e.submit("interrupted implementation")
+	e.runEngine()
+	if s := e.jobState(j.ID).State; s != SAwaitMerge {
+		t.Fatalf("setup: state=%s", s)
+	}
+	wt := filepath.Join(e.repo, ".worktrees", j.ID)
+	baseline := strings.TrimSpace(git(t, wt, "rev-parse", "HEAD~1"))
+
+	// Simulate a restart part-way through IMPLEMENTING: the state is back in
+	// flight and its earlier work is committed on the branch ahead of the
+	// baseline it recorded on entry.
+	got := e.jobState(j.ID)
+	got.State = SImplementing
+	got.Counters.StateEntryHead = baseline
+	if err := e.st.UpdateJob(got); err != nil {
+		t.Fatal(err)
+	}
+
+	e.runEngine()
+	prompts := e.promptsFor(j.ID, SImplementing)
+	last := prompts[len(prompts)-1]
+	if !strings.Contains(last, "interrupted and is being re-run") {
+		t.Errorf("re-run prompt does not say the state was interrupted:\n%s", last)
+	}
+	if !strings.Contains(last, "src/app.txt") {
+		t.Errorf("re-run prompt does not list the work already on the branch:\n%s", last)
+	}
+	if strings.Contains(last, "post-condition check") {
+		t.Error("an interrupted run is not a post-condition failure; the prompt says it is")
+	}
+}
+
+// The baseline a state measures its work against is captured once on entry and
+// kept. Re-reading it per run would make a state that already checkpointed
+// look like it had done nothing at all.
+func TestStateBaselineIsCapturedOnceAndClearedOnTransition(t *testing.T) {
+	e := newEnv(t)
+	j := e.submit("baseline lifecycle")
+	e.runEngine()
+	got := e.jobState(j.ID)
+	if got.State != SAwaitMerge {
+		t.Fatalf("state=%s hold=%q", got.State, got.HoldReason)
+	}
+	if got.Counters.StateEntryHead != "" {
+		t.Errorf("StateEntryHead=%q, want it cleared by the transition out of the state",
+			got.Counters.StateEntryHead)
 	}
 }

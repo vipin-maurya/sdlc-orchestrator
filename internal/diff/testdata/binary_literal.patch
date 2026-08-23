@@ -1,0 +1,16 @@
+diff --git a/keep.txt b/keep.txt
+index 4a58007..f8704fb 100644
+--- a/keep.txt
++++ b/keep.txt
+@@ -1 +1,2 @@
+ alpha
++bravo
+diff --git a/logo.png b/logo.png
+index 95e0be18ee12fbba8c51f33623a75b93c8eab368..61e07b169d4fb4bafbdb67f2e4796983caa9294b 100644
+GIT binary patch
+literal 23
+ecmZSJ<Y52*Pa!2UEiJVuHLpY=sj?)sm<s@2tq48<
+
+literal 18
+ZcmZQzWMcmRPa!8iJzpWIvLv;b3jj7z1||Ri
+

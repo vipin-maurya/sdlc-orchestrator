@@ -1,0 +1,184 @@
+diff --git a/pkg/file01.go b/pkg/file01.go
+index 9d0e394..bbb62d5 100644
+--- a/pkg/file01.go
++++ b/pkg/file01.go
+@@ -9,15 +9,15 @@ func F01_006() string { return "value 01 006" }
+ func F01_007() string { return "value 01 007" }
+ func F01_008() string { return "value 01 008" }
+ func F01_009() string { return "value 01 009" }
+-func F01_010() string { return "value 01 010" }
+-func F01_011() string { return "value 01 011" }
+-func F01_012() string { return "value 01 012" }
+-func F01_013() string { return "value 01 013" }
+-func F01_014() string { return "value 01 014" }
+-func F01_015() string { return "value 01 015" }
+-func F01_016() string { return "value 01 016" }
+-func F01_017() string { return "value 01 017" }
+-func F01_018() string { return "value 01 018" }
++func F01_010() string { return "CHANGED 01 010" }
++func F01_011() string { return "CHANGED 01 011" }
++func F01_012() string { return "CHANGED 01 012" }
++func F01_013() string { return "CHANGED 01 013" }
++func F01_014() string { return "CHANGED 01 014" }
++func F01_015() string { return "CHANGED 01 015" }
++func F01_016() string { return "CHANGED 01 016" }
++func F01_017() string { return "CHANGED 01 017" }
++func F01_018() string { return "CHANGED 01 018" }
+ func F01_019() string { return "value 01 019" }
+ func F01_020() string { return "value 01 020" }
+ func F01_021() string { return "value 01 021" }
+@@ -39,15 +39,15 @@ func F01_036() string { return "value 01 036" }
+ func F01_037() string { return "value 01 037" }
+ func F01_038() string { return "value 01 038" }
+ func F01_039() string { return "value 01 039" }
+-func F01_040() string { return "value 01 040" }
+-func F01_041() string { return "value 01 041" }
+-func F01_042() string { return "value 01 042" }
+-func F01_043() string { return "value 01 043" }
+-func F01_044() string { return "value 01 044" }
+-func F01_045() string { return "value 01 045" }
+-func F01_046() string { return "value 01 046" }
+-func F01_047() string { return "value 01 047" }
+-func F01_048() string { return "value 01 048" }
++func F01_040() string { return "CHANGED 01 040" }
++func F01_041() string { return "CHANGED 01 041" }
++func F01_042() string { return "CHANGED 01 042" }
++func F01_043() string { return "CHANGED 01 043" }
++func F01_044() string { return "CHANGED 01 044" }
++func F01_045() string { return "CHANGED 01 045" }
++func F01_046() string { return "CHANGED 01 046" }
++func F01_047() string { return "CHANGED 01 047" }
++func F01_048() string { return "CHANGED 01 048" }
+ func F01_049() string { return "value 01 049" }
+ func F01_050() string { return "value 01 050" }
+ func F01_051() string { return "value 01 051" }
+@@ -69,15 +69,15 @@ func F01_066() string { return "value 01 066" }
+ func F01_067() string { return "value 01 067" }
+ func F01_068() string { return "value 01 068" }
+ func F01_069() string { return "value 01 069" }
+-func F01_070() string { return "value 01 070" }
+-func F01_071() string { return "value 01 071" }
+-func F01_072() string { return "value 01 072" }
+-func F01_073() string { return "value 01 073" }
+-func F01_074() string { return "value 01 074" }
+-func F01_075() string { return "value 01 075" }
+-func F01_076() string { return "value 01 076" }
+-func F01_077() string { return "value 01 077" }
+-func F01_078() string { return "value 01 078" }
++func F01_070() string { return "CHANGED 01 070" }
++func F01_071() string { return "CHANGED 01 071" }
++func F01_072() string { return "CHANGED 01 072" }
++func F01_073() string { return "CHANGED 01 073" }
++func F01_074() string { return "CHANGED 01 074" }
++func F01_075() string { return "CHANGED 01 075" }
++func F01_076() string { return "CHANGED 01 076" }
++func F01_077() string { return "CHANGED 01 077" }
++func F01_078() string { return "CHANGED 01 078" }
+ func F01_079() string { return "value 01 079" }
+ func F01_080() string { return "value 01 080" }
+ func F01_081() string { return "value 01 081" }
+diff --git a/pkg/file02.go b/pkg/file02.go
+index 99339c8..2a7a0f2 100644
+--- a/pkg/file02.go
++++ b/pkg/file02.go
+@@ -9,15 +9,15 @@ func F02_006() string { return "value 02 006" }
+ func F02_007() string { return "value 02 007" }
+ func F02_008() string { return "value 02 008" }
+ func F02_009() string { return "value 02 009" }
+-func F02_010() string { return "value 02 010" }
+-func F02_011() string { return "value 02 011" }
+-func F02_012() string { return "value 02 012" }
+-func F02_013() string { return "value 02 013" }
+-func F02_014() string { return "value 02 014" }
+-func F02_015() string { return "value 02 015" }
+-func F02_016() string { return "value 02 016" }
+-func F02_017() string { return "value 02 017" }
+-func F02_018() string { return "value 02 018" }
++func F02_010() string { return "CHANGED 02 010" }
++func F02_011() string { return "CHANGED 02 011" }
++func F02_012() string { return "CHANGED 02 012" }
++func F02_013() string { return "CHANGED 02 013" }
++func F02_014() string { return "CHANGED 02 014" }
++func F02_015() string { return "CHANGED 02 015" }
++func F02_016() string { return "CHANGED 02 016" }
++func F02_017() string { return "CHANGED 02 017" }
++func F02_018() string { return "CHANGED 02 018" }
+ func F02_019() string { return "value 02 019" }
+ func F02_020() string { return "value 02 020" }
+ func F02_021() string { return "value 02 021" }
+@@ -39,15 +39,15 @@ func F02_036() string { return "value 02 036" }
+ func F02_037() string { return "value 02 037" }
+ func F02_038() string { return "value 02 038" }
+ func F02_039() string { return "value 02 039" }
+-func F02_040() string { return "value 02 040" }
+-func F02_041() string { return "value 02 041" }
+-func F02_042() string { return "value 02 042" }
+-func F02_043() string { return "value 02 043" }
+-func F02_044() string { return "value 02 044" }
+-func F02_045() string { return "value 02 045" }
+-func F02_046() string { return "value 02 046" }
+-func F02_047() string { return "value 02 047" }
+-func F02_048() string { return "value 02 048" }
++func F02_040() string { return "CHANGED 02 040" }
++func F02_041() string { return "CHANGED 02 041" }
++func F02_042() string { return "CHANGED 02 042" }
++func F02_043() string { return "CHANGED 02 043" }
++func F02_044() string { return "CHANGED 02 044" }
++func F02_045() string { return "CHANGED 02 045" }
++func F02_046() string { return "CHANGED 02 046" }
++func F02_047() string { return "CHANGED 02 047" }
++func F02_048() string { return "CHANGED 02 048" }
+ func F02_049() string { return "value 02 049" }
+ func F02_050() string { return "value 02 050" }
+ func F02_051() string { return "value 02 051" }
+@@ -69,15 +69,15 @@ func F02_066() string { return "value 02 066" }
+ func F02_067() string { return "value 02 067" }
+ func F02_068() string { return "value 02 068" }
+ func F02_069() string { return "value 02 069" }
+-func F02_070() string { return "value 02 070" }
+-func F02_071() string { return "value 02 071" }
+-func F02_072() string { return "value 02 072" }
+-func F02_073() string { return "value 02 073" }
+-func F02_074() string { return "value 02 074" }
+-func F02_075() string { return "value 02 075" }
+-func F02_076() string { return "value 02 076" }
+-func F02_077() string { return "value 02 077" }
+-func F02_078() string { return "value 02 078" }
++func F02_070() string { return "CHANGED 02 070" }
++func F02_071() string { return "CHANGED 02 071" }
++func F02_072() string { return "CHANGED 02 072" }
++func F02_073() string { return "CHANGED 02 073" }
++func F02_074() string { return "CHANGED 02 074" }
++func F02_075() string { return "CHANGED 02 075" }
++func F02_076() string { return "CHANGED 02 076" }
++func F02_077() string { return "CHANGED 02 077" }
++func F02_078() string { return "CHANGED 02 078" }
+ func F02_079() string { return "value 02 079" }
+ func F02_080() string { return "value 02 080" }
+ func F02_081() string { return "value 02 081" }
+diff --git a/pkg/file03.go b/pkg/file03.go
+index 544853a..44fd1a9 100644
+--- a/pkg/file03.go
++++ b/pkg/file03.go
+@@ -9,15 +9,15 @@ func F03_006() string { return "value 03 006" }
+ func F03_007() string { return "value 03 007" }
+ func F03_008() string { return "value 03 008" }
+ func F03_009() string { return "value 03 009" }
+-func F03_010() string { return "value 03 010" }
+-func F03_011() string { return "value 03 011" }
+-func F03_012() string { return "value 03 012" }
+-func F03_013() string { return "value 03 013" }
+-func F03_014() string { return "value 03 014" }
+-func F03_015() string { return "value 03 015" }
+-func F03_016() string { return "value 03 016" }
+-func F03_017() string { return "value 03 017" }
+-func F03_018() string { return "value 03 018" }
++func F03_010() string { return "CHANGED 03 010" }
++func F03_011() string { return "CHANGED 03 011" }
++func F03_012() string { return "CHANGED 03 012" }
++func F03_013() string { return "CHANGED 03 013" }
++func F03_014() string { return "CHANGED 03 014" }
++func F03_015() string { return "CHANGED 03 015" }
++func F03_016() string { return "CHANGED 03 016" }
++func F03_017() string { return "CHANGED 03 017" }
++func F03_018() string { return

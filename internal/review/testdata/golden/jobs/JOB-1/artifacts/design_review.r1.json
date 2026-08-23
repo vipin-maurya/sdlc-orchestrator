@@ -1,0 +1,19 @@
+{
+  "schema": "review/1",
+  "reviewed": "spec",
+  "summary": "The approach is right and the acceptance criteria are testable. Two gaps: one criterion has no owner in the plan, and the error path for an over-broad pattern is described but not planned for.",
+  "findings": [
+    {
+      "id": "DR-1",
+      "severity": "minor",
+      "description": "Acceptance criterion 2 (\"once per captured line\") is not observable from outside the package, so nothing in the plan can verify it.",
+      "recommendation": "Either drop it or state it as a property a test can read: one call to redact.Line per line written."
+    },
+    {
+      "id": "DR-2",
+      "severity": "nit",
+      "file": "internal/config/config.go",
+      "description": "The spec names a config key for the pattern table but does not say what an empty table means."
+    }
+  ]
+}

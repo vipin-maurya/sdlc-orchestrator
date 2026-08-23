@@ -10,9 +10,11 @@ import (
 )
 
 // Glob matches paths against a **-style glob:
-//   **  any number of path segments (including none)
-//   *   any run of characters within one segment
-//   ?   one character within a segment
+//
+//	**  any number of path segments (including none)
+//	*   any run of characters within one segment
+//	?   one character within a segment
+//
 // Paths are compared slash-separated, case-insensitively (Windows target).
 type Glob struct {
 	src string

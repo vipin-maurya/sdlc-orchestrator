@@ -1,0 +1,26 @@
+{
+  "schema": "spec/1",
+  "issue_summary": "Captured agent output is written to the job log verbatim, so a token pasted into an issue body ends up in plain text on disk and in every log tail printed afterwards.",
+  "approach": "Redact once, at the single point where captured bytes become a log line, rather than at each call site, so a new caller cannot forget to do it.",
+  "affected_files": [
+    "internal/execx/execx.go",
+    "internal/execx/redact.go",
+    "internal/config/config.go"
+  ],
+  "acceptance_criteria": [
+    "A captured line matching a configured token shape is stored as `[redacted]`.",
+    "Redaction runs once per captured line, not once per call site.",
+    "A line matching nothing is byte-identical to what the command wrote."
+  ],
+  "error_paths": [
+    "A malformed pattern fails config validation at load, naming the key and the regexp error.",
+    "A pattern that matches everything is rejected: a log of nothing but `[redacted]` is not a log."
+  ],
+  "out_of_scope": [
+    "Rewriting log files already on disk.",
+    "Redacting the prompts sent to the backend."
+  ],
+  "compatibility_concerns": [
+    "Existing logs keep their current contents; nothing rewrites them, so a token already leaked stays leaked until the file is deleted."
+  ]
+}

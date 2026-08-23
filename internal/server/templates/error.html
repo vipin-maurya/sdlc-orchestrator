@@ -1,0 +1,13 @@
+{{/* The error page, and the worked example of the rule
+     TestTemplatesExecuteWithZeroValues enforces: a content block must execute
+     against a pageData whose Body is nil. A page that dereferences .Body
+     unguarded renders fine in the test that built a model for it and panics on
+     the day something hands it nothing, which is always the day something has
+     already gone wrong. */}}
+{{define "content"}}
+{{with .Body}}
+<h1>{{.Code}} {{.Status}}</h1>
+<p class="err">{{.Msg}}</p>
+{{end}}
+<p><a href="/jobs">Back to the job list</a></p>
+{{end}}

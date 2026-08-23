@@ -1,0 +1,72 @@
+{{/* The read-only config (spec §5.1, §2.2). Owner: W2-H.
+
+     Read-only means there is no form on this page at all. The config decides
+     which backend reviews which state and what the release command is; it is
+     edited in a file, validated at load, and shown here as the thing that was
+     actually loaded — which is not always the same as the thing on disk, since
+     defaults are filled in and ${VAR} is expanded before this struct exists.
+
+     That expansion is also why the YAML below is redacted rather than printed:
+     a token that was a ${VAR} in the file is a token in the loaded struct.
+
+     The sections above the YAML are the same struct in the shape a reader asks
+     questions in. They are an index into the record, not a replacement for it,
+     which is why the whole YAML is still on the page underneath. */}}
+{{define "content"}}
+{{with .Body}}
+<div class="meta" style="margin-bottom: 1rem;">
+  <h1 style="margin: 0;">Config</h1>
+  <span>{{if .Path}}{{.Path}}{{else}}built-in defaults — no config file was loaded{{end}}</span>
+</div>
+
+<p class="note">This page is read-only. The config is edited in a file and validated
+  at load; nothing here writes anything.</p>
+
+{{if .Redacted}}
+<p class="note warn" style="margin-top: .6rem;">Values that name or look like a credential
+  have been replaced with <code>[redacted]</code>. The unredacted values are in the config
+  file and in the environment it was expanded from.</p>
+{{else}}
+<p class="muted" style="margin-top: .6rem; font-size: 13px;">Nothing in the loaded config looked
+  like a credential; any value that did would be shown as <code>[redacted]</code>.</p>
+{{end}}
+
+<div class="stack" style="margin-top: 1.5rem;">
+  {{range .Sections}}
+  <div>
+    <div class="meta" style="margin-bottom: .55rem;">
+      <strong style="font-size: 13px; color: var(--fg);">{{.Title}}</strong>
+      <span>{{.Note}}</span>
+    </div>
+    <div class="rows">
+      {{range .Rows}}
+      <div class="kv">
+        <span class="k">{{.K}}</span>
+        <span class="v">{{if .V}}{{.V}}{{else}}—{{end}}</span>
+        <span class="n">{{.Note}}</span>
+      </div>
+      {{end}}
+    </div>
+  </div>
+  {{end}}
+
+  <div>
+    <div class="meta" style="margin-bottom: .55rem;">
+      <strong style="font-size: 13px; color: var(--fg);">Resolved paths</strong>
+      <span>absolute, so they mean the same thing from any directory</span>
+    </div>
+    <div class="rows">
+      <div class="kv"><span class="k">config file</span><span class="v">{{if .Path}}{{.Path}}{{else}}(none — built-in defaults){{end}}</span><span class="n"></span></div>
+      <div class="kv"><span class="k">data dir</span><span class="v">{{.DataDir}}</span><span class="n"></span></div>
+      <div class="kv"><span class="k">jobs dir</span><span class="v">{{.JobsDir}}</span><span class="n"></span></div>
+      <div class="kv"><span class="k">database</span><span class="v">{{.DBPath}}</span><span class="n"></span></div>
+      <div class="kv"><span class="k">lock file</span><span class="v">{{.LockFile}}</span><span class="n">the engine-up signal</span></div>
+      <div class="kv"><span class="k">server listen</span><span class="v">{{if .Listen}}{{.Listen}}{{else}}(unset){{end}}</span><span class="n"></span></div>
+    </div>
+  </div>
+</div>
+
+<h2>Loaded config as YAML</h2>
+<pre>{{.YAML}}</pre>
+{{end}}
+{{end}}

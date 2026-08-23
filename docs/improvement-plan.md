@@ -10,6 +10,46 @@ Items are ordered by cost of leaving them unfixed, not by effort.
 
 ---
 
+## Status
+
+Every item below was checked against the code before being acted on. All
+seventeen held up as descriptions of a real defect; two corrections to the
+supporting evidence are noted inline below.
+
+| Item | Status | Where |
+|---|---|---|
+| 1 BOM | done | `artifact.trimJunk`, stripped by every `Load*` |
+| 2 out-of-band commits | done | `jobCtx.stateBaseline`, `syncHead` |
+| 3 `resume` flag parsing | done | `cli.parseArgs`, used by every subcommand |
+| 4 HeadSHA drift | done | `jobCtx.reconcile` classifies ahead/behind/diverged |
+| 5 verify pass | done | `engine/verify.go`, `artifact.ApplyVerdicts`, `prompts/verify_finding.md` |
+| 6 gate threshold | done | `policies.*_blocks_at`, `Review.Blocking(threshold)` |
+| 7 propagate findings | done | `counters.last_design_review` → IMPLEMENTING |
+| 8 human note channel | done | `sdlc resume --note` → `FixSource=human` |
+| 9 commit every step | done | checkpoint commits from `.sdlc/progress.jsonl`; `preserveWork` |
+| 10 retry context | done | `jobCtx.retryNote` |
+| 11 stream agent output | done | live logs, heartbeat, condensed action lines |
+| 12 heartbeat phases | done | `progress` events per phase and per flake rerun |
+| 13 planner/orchestrator split | done | `prompts/planning.md` |
+| 14 blast radius | done | `prompts/planning.md` |
+| 15 reconcile self-report | done | `reconcileClaims`, `presentKeys` in validation errors |
+| 16 model tier | done | `sdlc.example.yaml` agent assignments |
+| 17 exit code vs artifact | done | `post_condition_overrode_exit` note |
+
+Two evidence corrections, neither of which changes an item's conclusion:
+
+- **Item 11.** The claude backend was invoked with `--output-format json`, not
+  `stream-json` — so no event stream existed to discard. It is now opt-in via
+  `backends.claude.stream_json`, and the silence had a second cause the item
+  did not name: the agent log was written *after* the process exited, so a
+  running state had no readable log at all.
+- **Item 2.** The guard is scoped to the head captured when the *state* begins,
+  not to `headBefore` inside `runAgent`. A per-attempt baseline would make a
+  retry blind to what the previous attempt did, and after item 9 it would fold
+  the state's own checkpoints into its own baseline.
+
+---
+
 ## P0 — data loss and dead ends
 
 ### 1. Strip the BOM before parsing agent JSON

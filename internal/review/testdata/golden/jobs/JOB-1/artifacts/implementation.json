@@ -1,0 +1,17 @@
+{
+  "schema": "implementation/1",
+  "summary": "Redaction happens once, in the capture path, with the pattern table beside it.",
+  "files_changed": [
+    "internal/execx/execx.go",
+    "internal/execx/redact.go"
+  ],
+  "tests_added_or_changed": [
+    "internal/execx/redact_test.go"
+  ],
+  "steps_completed": [
+    {"id": "S1", "status": "done"},
+    {"id": "S2", "status": "done"},
+    {"id": "S3", "status": "skipped", "note": "the SPEC section it belongs in is being rewritten by another change; documenting it here would conflict"}
+  ],
+  "test_change_requested": null
+}

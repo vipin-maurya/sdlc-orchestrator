@@ -1,0 +1,27 @@
+{
+  "schema": "review/1",
+  "reviewed": "final",
+  "summary": "Nothing blocks the merge. One advisory finding stands and one was put to a vote and refuted.",
+  "findings": [
+    {
+      "id": "FR-1",
+      "severity": "nit",
+      "file": "internal/execx/execx.go",
+      "description": "Claimed that the redaction pass allocates a new buffer per line and doubles the cost of a noisy build.",
+      "recommendation": "None: the allocation is the scanner's own, which the loop already reused.",
+      "verification": {
+        "votes": 3,
+        "confirmed": 1,
+        "refuted": 2,
+        "min_confirm": 2,
+        "survived": false,
+        "original_severity": "minor"
+      }
+    },
+    {
+      "id": "FR-2",
+      "severity": "minor",
+      "description": "The pattern table is documented in the config example but not in SPEC §12, which is where an operator looks first."
+    }
+  ]
+}

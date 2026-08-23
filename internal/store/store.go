@@ -7,6 +7,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,12 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+// ErrDecisionPending is returned by AddApproval when the job already has an
+// unconsumed row for that gate. Callers test with errors.Is: the CLI answers a
+// usage-level refusal and the server a 409, and neither may match on the
+// driver's own constraint text, which names the schema.
+var ErrDecisionPending = errors.New("a decision is already pending for this job and gate")
 
 type Store struct {
 	db *sql.DB
@@ -45,6 +52,13 @@ type Counters struct {
 	// BaseSHA is the worktree HEAD at job creation — the base every review
 	// diffs against.
 	BaseSHA string `json:"base_sha,omitempty"`
+	// StateEntryHead is the branch head when the current state began its work:
+	// the baseline its diff, its post-conditions and its test-file guard are
+	// measured against. It is persisted because a state can be re-run after a
+	// crash with its own checkpoint commits already on the branch, and a head
+	// re-read at that point would fold the state's own work into its baseline.
+	// Cleared on every transition, so each state entry captures it afresh.
+	StateEntryHead string `json:"state_entry_head,omitempty"`
 	// LastFailureLog is the log file of the most recent failed exec phase.
 	LastFailureLog string `json:"last_failure_log,omitempty"`
 	// HumanRejectReason carries the reason from a merge-gate rejection into
@@ -202,7 +216,60 @@ func Open(path string, busyTimeout time.Duration) (*Store, error) {
 			return nil, fmt.Errorf("migrate: %s: %w", stmt, err)
 		}
 	}
+	// At most one unconsumed approval per job and gate.
+	//
+	// The check-then-write guards in cli and server are both a read followed by
+	// a separate write, so neither survives two writers arriving together —
+	// and a surplus row is not a harmless duplicate. PendingApproval returns
+	// the oldest, so the engine consumes one and leaves the other unconsumed;
+	// every gate here is re-enterable (a rejected spec re-parks at the spec
+	// gate, a rejected merge comes back round through FIXING), so the leftover
+	// is consumed on the *next* visit as a decision nobody made, against a job
+	// that has moved on since. Only a constraint the writers share can rule
+	// that out, so the guards above are now the good error message and this is
+	// the guarantee.
+	//
+	// The dedupe runs first: a database written before this index can already
+	// hold such a pair, and CREATE UNIQUE INDEX against rows that violate it
+	// fails — which would take Open, and so every command, down with it.
+	// Marking the surplus consumed is what the guard would have done at write
+	// time; the oldest row is the decision, and the rest never should have
+	// existed.
+	// Both statements run only when the index is not there yet. The dedupe is
+	// a migration, not a maintenance sweep: once the index exists the database
+	// cannot hold a duplicate pending pair, so re-running the UPDATE on every
+	// `sdlc` invocation would be a full scan of the approvals table to change
+	// nothing.
+	haveIndex, err := indexExists(db, "idx_approvals_pending")
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+	if !haveIndex {
+		for _, stmt := range []string{
+			`UPDATE approvals SET consumed = 1
+			   WHERE consumed = 0 AND id NOT IN (
+			     SELECT MIN(id) FROM approvals WHERE consumed = 0 GROUP BY job_id, gate)`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS idx_approvals_pending
+			   ON approvals(job_id, gate) WHERE consumed = 0`,
+		} {
+			if _, err := db.Exec(stmt); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("migrate: %s: %w", stmt, err)
+			}
+		}
+	}
 	return &Store{db: db}, nil
+}
+
+// indexExists reports whether a named index is already in the schema.
+func indexExists(db *sql.DB, name string) (bool, error) {
+	var found string
+	err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='index' AND name=?`, name).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -334,10 +401,27 @@ func (s *Store) AddEvent(e *Event) error {
 	return nil
 }
 
+// eventColumns is the select list every event read shares, so a column added
+// to the table is added to the scan in one place.
+const eventColumns = `id,job_id,state,kind,agent,backend,model,effort,
+	binary_version,prompt_hash,input_ref,output_ref,exit_code,duration_ms,
+	head_before,head_after,tokens_in,tokens_out,detail,created_at`
+
+func scanEvent(sc interface{ Scan(...any) error }) (*Event, error) {
+	var e Event
+	var created string
+	if err := sc.Scan(&e.ID, &e.JobID, &e.State, &e.Kind, &e.Agent, &e.Backend, &e.Model,
+		&e.Effort, &e.BinaryVersion, &e.PromptHash, &e.InputRef, &e.OutputRef, &e.ExitCode,
+		&e.DurationMS, &e.HeadBefore, &e.HeadAfter, &e.TokensIn, &e.TokensOut, &e.Detail,
+		&created); err != nil {
+		return nil, err
+	}
+	e.CreatedAt = parseTime(created)
+	return &e, nil
+}
+
 func (s *Store) ListEvents(jobID string) ([]*Event, error) {
-	rows, err := s.db.Query(`SELECT id,job_id,state,kind,agent,backend,model,effort,
-		binary_version,prompt_hash,input_ref,output_ref,exit_code,duration_ms,
-		head_before,head_after,tokens_in,tokens_out,detail,created_at
+	rows, err := s.db.Query(`SELECT `+eventColumns+`
 		FROM events WHERE job_id=? ORDER BY id`, jobID)
 	if err != nil {
 		return nil, err
@@ -345,22 +429,35 @@ func (s *Store) ListEvents(jobID string) ([]*Event, error) {
 	defer rows.Close()
 	var out []*Event
 	for rows.Next() {
-		var e Event
-		var created string
-		if err := rows.Scan(&e.ID, &e.JobID, &e.State, &e.Kind, &e.Agent, &e.Backend, &e.Model,
-			&e.Effort, &e.BinaryVersion, &e.PromptHash, &e.InputRef, &e.OutputRef, &e.ExitCode,
-			&e.DurationMS, &e.HeadBefore, &e.HeadAfter, &e.TokensIn, &e.TokensOut, &e.Detail,
-			&created); err != nil {
+		e, err := scanEvent(rows)
+		if err != nil {
 			return nil, err
 		}
-		e.CreatedAt = parseTime(created)
-		out = append(out, &e)
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }
 
-// CountEvents returns the number of events of a kind for a job (used for
-// sequence numbers in artifact/log file names).
+// LastEventOfKind returns the newest event of one kind for a job, or (nil, nil)
+// when there is none.
+//
+// It exists so a caller that wants the latest progress line does not read the
+// job's whole history — every row, every detail blob — to find one row of it.
+// idx_events_job(job_id, id) makes this a backwards index scan that stops at
+// the first match, which matters because the job page re-runs it on the
+// browser's reload timer for as long as a job is live.
+func (s *Store) LastEventOfKind(jobID, kind string) (*Event, error) {
+	row := s.db.QueryRow(`SELECT `+eventColumns+`
+		FROM events WHERE job_id=? AND kind=? ORDER BY id DESC LIMIT 1`, jobID, kind)
+	e, err := scanEvent(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return e, err
+}
+
+// CountEvents returns the number of events recorded for a job — the sequence
+// number an artifact or log file name gets, and the total the job page shows.
 func (s *Store) CountEvents(jobID string) (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM events WHERE job_id=?`, jobID).Scan(&n)
@@ -373,10 +470,29 @@ func (s *Store) AddApproval(a *Approval) error {
 		VALUES (?,?,?,?,?,?,0,?)`,
 		a.JobID, a.Gate, a.Decision, a.Reason, a.Note, boolInt(a.Cancel), fmtTime(a.CreatedAt))
 	if err != nil {
+		// Matched on text because the driver reports the partial index as a
+		// plain constraint failure with no code a caller can switch on. The
+		// job and gate are named here because ErrDecisionPending alone does
+		// not say which decision is in the way, and the caller prints this.
+		if isPendingConflict(err) {
+			return fmt.Errorf("%s %s: %w", a.JobID, a.Gate, ErrDecisionPending)
+		}
 		return err
 	}
 	a.ID, _ = res.LastInsertId()
 	return nil
+}
+
+// isPendingConflict reports whether err is idx_approvals_pending refusing a
+// second unconsumed row. It keys on job_id rather than on the word UNIQUE
+// alone: that index is the only one this table carries beyond the primary key,
+// and a collision on the key itself would be a different failure entirely,
+// which must not be reported to the operator as a pending decision.
+// TestPendingConflictIsRecognised pins the driver's wording so a driver
+// upgrade that rephrases it fails here rather than in production.
+func isPendingConflict(err error) bool {
+	s := err.Error()
+	return strings.Contains(s, "UNIQUE constraint failed") && strings.Contains(s, "approvals.job_id")
 }
 
 // PendingApproval returns the oldest unconsumed approval for a job+gate.

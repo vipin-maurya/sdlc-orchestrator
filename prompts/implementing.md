@@ -38,7 +38,8 @@ your summary. Implement ALL acceptance criteria, including error paths.
 - Do NOT run git commands (no commit, no branch, no reset). The orchestrator commits for you.
 - Do NOT run builds or full test suites; the orchestrator does that after you finish. (Running a
   single fast test to check your work is acceptable if the environment allows it.)
-- Do not touch files under `.sdlc/` except the output file below.
+- Do not touch files under `.sdlc/` except the two you are told to write: `progress.jsonl` and
+  the output file below.
 
 # Accounting for the plan
 
@@ -57,6 +58,22 @@ you leave out fails this state and the whole thing runs again.
 a file you did not end up changing fails this state, so report what you really did — if you
 substituted a different file for the one the plan named, list the file you actually wrote and say
 so in your summary.
+
+# Report each step as you finish it
+
+The moment you finish a step — not at the end, not in a batch — append one line to
+`.sdlc/progress.jsonl`:
+
+```
+{"step": "S1", "summary": "extracted cleanMerchantName into PerFieldParser"}
+```
+
+One compact JSON object per line, nothing else in the file. The orchestrator watches it and
+commits your work as each step lands, so an interrupted or rejected state costs one step instead
+of the whole thing. It is also the only way anyone can see progress while you are still working.
+
+This file is a running log, not your report: you still write the full `steps_completed` array
+below, and a step you report here but not there still fails the state.
 
 # Output (mandatory)
 

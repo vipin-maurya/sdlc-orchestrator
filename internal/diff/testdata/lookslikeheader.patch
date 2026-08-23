@@ -1,0 +1,14 @@
+diff --git a/embedded.txt b/embedded.txt
+index 1334eb6..0e21505 100644
+--- a/embedded.txt
++++ b/embedded.txt
+@@ -1,5 +1,6 @@
+ intro
+----foo
+- diff --git a/x b/y
+-@@ fake @@
++---bar
++ diff --git a/p b/q
++@@ also fake @@
+++++ baz
+ outro

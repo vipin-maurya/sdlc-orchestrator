@@ -1,0 +1,139 @@
+{{/* Decision forms. Owner: W2-I.
+
+     Every form defined here must carry the hidden csrf input and the hidden
+     state input: without the first the POST is refused, and without the second
+     a decision rendered before the job moved would apply after it (AC-11,
+     AC-13).
+
+     Each template renders a FormModel (actions.go), so a page invokes them as
+     {{template "decisionForm" .Form}}. The model carries the job rather than
+     an id and a state separately, so the hidden state field can never describe
+     a different job than the action URL.
+
+     Each form also carries an id. The Review Dashboard puts a second copy of
+     the approve and reject buttons in the bar pinned to the bottom of the
+     document, and those buttons submit these forms by id rather than by being
+     a second form: two forms posting the same decision would be two places for
+     the hidden state field to be wrong, and only one of them would be tested.
+
+     data-gate-state is app.js's hook: when the live stream shows the job in
+     another state, or goes stale, the buttons in a form carrying this
+     attribute — and the buttons elsewhere that submit it — are disabled in
+     place, with the reason shown. That is a convenience: the server refuses
+     the same POST regardless. */}}
+
+{{define "decisionForm"}}
+{{if and .Gate (ne .Gate "hold")}}
+<div class="decide">
+  <form id="approve-form" method="post" action="/jobs/{{.Job.ID}}/approve" data-gate-state="{{.Job.State}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="state" value="{{.Job.State}}">
+    <label for="approve-note">Note for the next agent (optional)</label>
+    <input type="text" id="approve-note" name="note" maxlength="500"
+           placeholder="recorded with the approval, and read verbatim by whatever runs next">
+    <button type="submit" class="approve">Approve {{.Gate}}</button>
+  </form>
+
+  <form id="reject-form" method="post" action="/jobs/{{.Job.ID}}/reject" data-gate-state="{{.Job.State}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="state" value="{{.Job.State}}">
+    {{/* required, and required again on the server: the reason reaches the
+         next agent verbatim, and an empty one tells it only that somebody
+         said no. */}}
+    <label for="reject-reason">Reason (required)</label>
+    <textarea id="reject-reason" name="reason" rows="3" required
+              placeholder="what is wrong, in the words the next agent will read"></textarea>
+    <label class="check">
+      <input type="checkbox" name="cancel" value="yes">
+      Cancel the job instead of sending it back to be fixed — this deletes its
+      worktree
+    </label>
+    <button type="submit" class="reject">Reject {{.Gate}}</button>
+  </form>
+</div>
+{{end}}
+{{end}}
+
+{{define "holdForm"}}
+<div class="decide hold">
+  <form id="resume-form" method="post" action="/jobs/{{.Job.ID}}/resume" data-gate-state="{{.Job.State}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="state" value="{{.Job.State}}">
+    {{/* The list is engine.ResumableStates(), rendered rather than written
+         out, so a state added to the engine appears here and an invalid one is
+         not selectable. The empty option is the default the CLI has: resume
+         into the state the job stopped in. */}}
+    <label for="resume-to">Resume into</label>
+    <select id="resume-to" name="to">
+      <option value="">the state it stopped in</option>
+      {{range .ResumableStates}}<option value="{{.}}">{{.}}</option>
+      {{end}}
+    </select>
+    <label for="resume-note">Instruction for the agent (optional)</label>
+    <input type="text" id="resume-note" name="note" maxlength="500"
+           placeholder="e.g. those fixtures are stale, update them">
+    <button type="submit" class="resume">Resume</button>
+  </form>
+
+  <form id="cancel-form" method="post" action="/jobs/{{.Job.ID}}/cancel" data-gate-state="{{.Job.State}}">
+    <input type="hidden" name="csrf" value="{{.CSRF}}">
+    <input type="hidden" name="state" value="{{.Job.State}}">
+    {{/* A checkbox rather than a bare button, matching promptHold's [y/N]:
+         cancelling deletes the worktree, and anything not committed goes with
+         it. The server refuses a POST without confirm=yes, so removing the box
+         does not make the button a one-click delete. */}}
+    <label class="check">
+      <input type="checkbox" name="confirm" value="yes" required>
+      Yes — cancel {{.Job.ID}} and delete its worktree
+    </label>
+    <button type="submit" class="cancel">Cancel job</button>
+  </form>
+</div>
+{{end}}
+
+{{/* decisionBar is the copy of the decision that stays on screen while the
+     document scrolls. It renders no form of its own: every button here submits
+     one of the forms above by id, so there is exactly one place the hidden
+     state and csrf fields live and exactly one thing to keep correct.
+
+     It is invoked with the same FormModel, and draws the pair that matches the
+     gate — a held job is cleared with resume or cancel, not approve or
+     reject. */}}
+{{define "decisionBar"}}
+<div class="decide-bar">
+  <div class="progress">
+    {{/* Written by app.js from the checkboxes in the panel. The server renders
+         the un-ticked state, which is what is true before anybody has read
+         anything. */}}
+    <span class="label" id="triage-label">Findings checklist</span>
+    <span class="bar"><span id="triage-bar" style="width: 0%"></span></span>
+  </div>
+  <span class="muted note-inline" id="triage-note"></span>
+  <span class="keys">a approve · r reject</span>
+  {{if eq .Gate "hold"}}
+  <button type="submit" class="cancel" form="cancel-form">Cancel job</button>
+  <button type="submit" class="resume" form="resume-form">Resume</button>
+  {{else if .Gate}}
+  <button type="submit" class="reject" form="reject-form">Request changes</button>
+  <button type="submit" class="approve" form="approve-form">Approve {{.Gate}}</button>
+  {{end}}
+</div>
+{{end}}
+
+{{define "diffViewToggle"}}
+{{/* A form rather than a link because it writes a cookie, and a GET that
+     changes stored state is one a prefetch can trigger. The handler sends the
+     reader back to the page they came from when that page is this server's.
+
+     It reads only .CSRF, so it renders from a FormModel and from a bare
+     pageData alike — the diff pages invoke it with the page model, and a
+     toggle that needed more than a token would break them. Which view is
+     current is not marked here: diff.html already says so on its no-JavaScript
+     links, and two things claiming to show the active view is one of them
+     being wrong eventually. */}}
+<form method="post" action="/prefs/diff-view" class="viewpref">
+  <input type="hidden" name="csrf" value="{{.CSRF}}">
+  <button type="submit" name="view" value="unified">Remember unified</button>
+  <button type="submit" name="view" value="split">Remember side by side</button>
+</form>
+{{end}}

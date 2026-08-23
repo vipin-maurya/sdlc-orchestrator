@@ -1,0 +1,133 @@
+/* Diff viewer styles. Owner: W2-K.
+ *
+ * Diff-level colouring only, which is spec §8.6's mandatory half: add/remove/
+ * context backgrounds, two line-number gutters and an intra-line mark. There is
+ * no language highlighting, because a hunk is a fragment — nothing here can
+ * know whether the line above the window opened a string — and a confident
+ * wrong colouring on the page where somebody decides to merge is worse than
+ * plain text.
+ *
+ * Installed fonts only. Nothing is fetched: `sdlc serve` runs on machines with
+ * no network, and a request for a font would also tell whoever answers it which
+ * gates the operator is reading. */
+
+.diff-toolbar { display: flex; gap: .5rem; align-items: center; margin: .8rem 0; }
+.diff-toolbar .diff-view {
+  padding: .2rem .6rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  text-decoration: none;
+  color: var(--dim);
+  font-size: 13px;
+}
+.diff-toolbar .diff-view.on { color: var(--fg); border-color: var(--link); }
+
+table.fileindex { margin: .6rem 0 1.2rem; }
+table.fileindex td.num.add { color: var(--ok); }
+table.fileindex td.num.del { color: var(--bad); }
+.badge.test { color: var(--link); border-color: var(--link); }
+.badge.status.added   { color: var(--ok);  border-color: var(--ok); }
+.badge.status.deleted { color: var(--bad); border-color: var(--bad); }
+.badge.status.renamed,
+.badge.status.copied,
+.badge.status.mode    { color: var(--warn); border-color: var(--warn); }
+
+details.dfile, div.dfile {
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  margin: .8rem 0;
+  overflow: hidden;
+}
+details.dfile > summary, div.dfile > .summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .5rem;
+  align-items: center;
+  padding: .5rem .7rem;
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+div.dfile > .summary { cursor: auto; }
+.dpath { font-family: var(--mono); font-size: 13px; word-break: break-all; }
+.counts { margin-left: auto; font-family: var(--mono); font-size: 12px; }
+.counts .add { color: var(--ok); }
+.counts .del { color: var(--bad); }
+.filelink { font-size: 12px; }
+p.stub { margin: .8rem .7rem; color: var(--dim); }
+
+/* The rows. A patch is read a column at a time, so nothing wraps by default
+ * except where a line is genuinely too long: overflow-x on the file keeps a
+ * 400-character minified line from stretching the whole page. */
+table.dtable {
+  border-collapse: collapse;
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+  tab-size: 4;
+}
+table.dtable td {
+  border: 0;
+  padding: 0 .4rem;
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+table.dtable td.ln {
+  width: 1%;
+  min-width: 3.2rem;
+  text-align: right;
+  color: var(--dim);
+  background: color-mix(in srgb, var(--fg) 5%, transparent);
+  user-select: none;
+}
+table.dtable td.sg { width: 1%; color: var(--dim); user-select: none; }
+table.dtable tr.hunk td {
+  background: color-mix(in srgb, var(--link) 12%, transparent);
+  color: var(--dim);
+  padding: .15rem .4rem;
+}
+table.dtable tr.hunk .hh { color: var(--link); }
+
+/* Green and red are the whole colour vocabulary here, and they are backed by a
+ * left border as well as a tint: a red/green-blind reader gets the sign column
+ * and the border, and the page still reads. */
+table.dtable tr.add td, table.dtable td.add {
+  background: color-mix(in srgb, var(--ok) 16%, transparent);
+}
+table.dtable tr.del td, table.dtable td.del {
+  background: color-mix(in srgb, var(--bad) 16%, transparent);
+}
+table.dtable td.tx.add { border-left: 2px solid var(--ok); }
+table.dtable td.tx.del { border-left: 2px solid var(--bad); }
+table.dtable td.nil, table.dtable td.tx.nil {
+  background: color-mix(in srgb, var(--fg) 7%, transparent);
+}
+
+/* The intra-line mark. It is deliberately quiet: the row's background already
+ * says the line changed, and this only says where. */
+table.dtable .mark {
+  border-radius: 3px;
+  padding: 0 1px;
+  background: color-mix(in srgb, var(--warn) 42%, transparent);
+  color: var(--fg);
+}
+
+.nonl {
+  margin-left: .5rem;
+  padding: 0 .3rem;
+  border: 1px solid var(--warn);
+  border-radius: 3px;
+  color: var(--warn);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* Side-by-side is two panes on a wide screen and, below that, the same table
+ * scrolled sideways rather than squeezed: two 40-character columns on a phone
+ * would be unreadable in a way that reads as a rendering bug. */
+@media (max-width: 900px) {
+  details.dfile, div.dfile { overflow-x: auto; }
+  table.dtable { min-width: 46rem; }
+}

@@ -1,0 +1,86 @@
+{{/* The job list (spec §5.1). Owner: W2-H.
+
+     "Waiting on you" is a separate block rather than a sort key: the whole
+     point of the page is that a job needing a decision is not allowed to fall
+     below one that does not merely because something else was touched later.
+     The Review Dashboard design draws one dense grid; it keeps the split,
+     because the design's own review screen puts the same queue in a rail for
+     the same reason.
+
+     The data-job / data-field hooks are the contract app.js replaces rows
+     through (plan §2.7). Times are emitted as RFC3339 in a <time datetime>
+     and turned into "4m ago" in the browser: a relative time rendered on the
+     server is wrong by the time it is read, and the reader may be on the far
+     end of an ssh -L in another timezone. */}}
+
+{{/* The header cells carry the same column classes as the data cells below
+     them. They are not needed to style the header — it has its own type — but
+     a column is dropped at a narrow width by hiding a class, and a header that
+     did not answer to that class would stay behind after its column went,
+     labelling whatever slid into its place. */}}
+{{define "gridhead"}}
+<div class="head">
+  <span>job</span><span class="title">title</span><span class="target">target</span>
+  <span class="phase">phase</span><span class="gate">gate</span><span class="age right">since</span>
+</div>
+{{end}}
+
+{{/* One row. The whole row is not a link — a row that was one could not hold
+     the gate badge as its own link, and the id is the affordance every other
+     surface uses. */}}
+{{define "gridrows"}}
+{{range .}}
+<div class="row" data-job="{{.Job.ID}}">
+  <span class="id"><a href="/jobs/{{.Job.ID}}">{{.Job.ID}}</a></span>
+  <span class="title" data-field="title">{{.Job.IssueTitle}}</span>
+  <span class="target">{{.Job.Target}}</span>
+  <span class="phase">
+    <span class="state {{.StateClass}}" data-field="state">{{.Job.State}}</span>
+    {{/* The bar takes its colour from the state, so "how far along" and "is
+         this healthy" are one glance rather than two. */}}
+    <span class="bar state {{.StateClass}}"><span style="width: {{.Pct}}%"></span></span>
+  </span>
+  <span class="gate" data-field="gate">
+    {{if .Gate}}<a class="gatepill {{.GateClass}}" href="/jobs/{{.Job.ID}}/gate">{{.Gate}}</a>{{end}}
+  </span>
+  <span class="age right" data-field="since">
+    <time datetime="{{rfc3339 .Job.StateEnteredAt}}">{{rfc3339 .Job.StateEnteredAt}}</time>
+  </span>
+</div>
+{{end}}
+{{end}}
+
+{{define "content"}}
+{{with .Body}}
+<div class="meta" style="margin-bottom: .9rem;">
+  <h1 style="margin: 0;">Jobs</h1>
+  <span>{{.Counts.Open}} open · {{.Counts.Waiting}} waiting on you ·
+        {{.Counts.Running}} running{{if .Counts.Held}} · {{.Counts.Held}} held{{end}}</span>
+</div>
+
+{{/* Real links, not a class app.js toggles: a filtered list is one an operator
+     will paste to somebody else, and it has to survive that and a reload. */}}
+<div class="chips" style="margin-bottom: 1rem;">
+  {{range .Filters}}
+  <a class="chip{{if .On}} on{{end}}" href="/jobs?show={{.Key}}">{{.Label}} {{.Count}}</a>
+  {{end}}
+  <a class="chip" href="/submit" style="margin-left: auto;">New job</a>
+</div>
+
+<div data-joblist data-show="{{.Show}}">
+  <h2>Waiting on you</h2>
+  {{if .Waiting}}
+    <div class="jobgrid">{{template "gridhead"}}{{template "gridrows" .Waiting}}</div>
+  {{else}}
+    <p class="muted">Nothing is waiting for a decision.</p>
+  {{end}}
+
+  <h2>Everything else</h2>
+  {{if .Rest}}
+    <div class="jobgrid">{{template "gridhead"}}{{template "gridrows" .Rest}}</div>
+  {{else}}
+    <p class="muted">No other jobs. <a href="/submit">Submit one</a>.</p>
+  {{end}}
+</div>
+{{end}}
+{{end}}

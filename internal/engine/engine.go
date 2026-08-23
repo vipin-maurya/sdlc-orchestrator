@@ -17,6 +17,7 @@ import (
 	"github.com/vipinm/sdlc-orchestrator/internal/config"
 	"github.com/vipinm/sdlc-orchestrator/internal/gitx"
 	"github.com/vipinm/sdlc-orchestrator/internal/resource"
+	"github.com/vipinm/sdlc-orchestrator/internal/review"
 	"github.com/vipinm/sdlc-orchestrator/internal/store"
 )
 
@@ -30,6 +31,7 @@ type Engine struct {
 	mu         sync.Mutex
 	inFlight   map[string]bool
 	reconciled map[string]bool
+	announced  map[string]gateNotice
 	sem        chan struct{}
 	wg         sync.WaitGroup
 
@@ -48,6 +50,7 @@ func New(cfg *config.Config, st *store.Store, logger *log.Logger) *Engine {
 		logger:     logger,
 		inFlight:   map[string]bool{},
 		reconciled: map[string]bool{},
+		announced:  map[string]gateNotice{},
 		sem:        make(chan struct{}, cfg.Orchestrator.MaxParallelJobs),
 	}
 }
@@ -143,7 +146,17 @@ func (e *Engine) tick(ctx context.Context) (dispatched bool, pending int, err er
 		if err := e.handleControls(ctx, j); err != nil {
 			e.logger.Printf("%s: control handling: %v", j.ID, err)
 		}
-		if isTerminal(j.State) || isHeld(j.State) {
+		if isTerminal(j.State) {
+			continue
+		}
+		// Announced after handleControls, so a job whose cancel or resume row
+		// just landed is no longer at a gate and is not announced, and before
+		// the held-job skip, because a held job is exactly the case that used
+		// to leave the console silent.
+		if gate := review.GateFor(j.State); gate != "" {
+			e.announceGate(ctx, j, gate)
+		}
+		if isHeld(j.State) {
 			continue
 		}
 		// Job-age budget.
@@ -267,11 +280,18 @@ func (e *Engine) handleControls(ctx context.Context, j *store.Job) error {
 	return nil
 }
 
-// handleGate consumes merge/release approvals for parked jobs.
+// handleGate consumes the approval row a parked job is waiting on.
+//
+// The gate name comes from review.GateFor so that the state->gate mapping
+// lives in exactly one place: the document the operator reads, the row the CLI
+// writes and the arm chosen here are then guaranteed to agree, and adding a
+// gate does not mean remembering to update a second switch in here.
 func (e *Engine) handleGate(ctx context.Context, j *store.Job) error {
-	gate := "merge"
-	if j.State == SAwaitRelease {
-		gate = "release"
+	gate := review.GateFor(j.State)
+	if gate == "" || gate == review.GateHold {
+		// A held job is cleared by handleControls with resume or cancel; there
+		// is no approval row for it to consume.
+		return nil
 	}
 	a, err := e.st.PendingApproval(j.ID, gate)
 	if err != nil || a == nil {
@@ -280,6 +300,31 @@ func (e *Engine) handleGate(ctx context.Context, j *store.Job) error {
 	_ = e.st.ConsumeApproval(a.ID)
 	e.event(j, "approval", map[string]any{"gate": gate, "decision": a.Decision, "reason": a.Reason})
 	switch {
+	case gate == review.GateSpec && a.Decision == "approve":
+		e.transition(j, SImplementing, "spec approved")
+	case gate == review.GateSpec && a.Decision == "reject":
+		if a.Cancel {
+			e.transition(j, SCancelled, "spec rejected (cancelled): "+a.Reason)
+			e.cleanup(ctx, j)
+		} else {
+			// Back to PLANNING with the objection attached. The review-round
+			// counters are deliberately not touched: they budget automated
+			// rework, and spending them on a human decision would turn two
+			// human "no"s into an escalation.
+			j.Counters.HumanRejectReason = a.Reason
+			e.transition(j, SPlanning, "spec rejected: "+a.Reason)
+		}
+	case gate == review.GateCode && a.Decision == "approve":
+		e.transition(j, SBuilding, "code approved")
+	case gate == review.GateCode && a.Decision == "reject":
+		if a.Cancel {
+			e.transition(j, SCancelled, "code rejected (cancelled): "+a.Reason)
+			e.cleanup(ctx, j)
+		} else {
+			j.Counters.HumanRejectReason = a.Reason
+			j.Counters.FixSource = "human"
+			e.transition(j, SFixing, "code rejected: "+a.Reason)
+		}
 	case gate == "merge" && a.Decision == "approve":
 		e.transition(j, SMerging, "merge approved")
 	case gate == "merge" && a.Decision == "reject":
@@ -437,6 +482,16 @@ func (e *Engine) transition(j *store.Job, next, note string) {
 	j.State = next
 	j.StateEnteredAt = time.Now()
 	j.Counters.AgentRetries = 0
+	// The next state measures its work from wherever the branch is when it
+	// starts — including any commits a human made while the job was held.
+	j.Counters.StateEntryHead = ""
+	// The job is leaving whatever gate it was at, so its notice is stale. Drop
+	// it here rather than in the gate handlers: this is the one place every
+	// state change goes through, and it is what makes a job that parks again
+	// later, on a different gate, announce again instead of staying silent.
+	e.mu.Lock()
+	delete(e.announced, j.ID)
+	e.mu.Unlock()
 	if err := e.st.UpdateJob(j); err != nil {
 		e.logger.Printf("%s: persist transition %s->%s: %v", j.ID, prev, next, err)
 	}

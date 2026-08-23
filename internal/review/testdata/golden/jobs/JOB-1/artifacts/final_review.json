@@ -1,0 +1,14 @@
+{
+  "schema": "review/1",
+  "reviewed": "final",
+  "summary": "UNVERIFIED FINAL SUMMARY — this text must never reach a gate document; the verified copy supersedes it.",
+  "findings": [
+    {
+      "id": "FR-1",
+      "severity": "major",
+      "file": "internal/execx/execx.go",
+      "description": "The redaction pass allocates a new buffer per line.",
+      "recommendation": "Reuse the scanner's buffer."
+    }
+  ]
+}

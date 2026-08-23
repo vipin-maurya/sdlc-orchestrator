@@ -4,10 +4,13 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,6 +74,7 @@ type Config struct {
 	Policies     Policies           `yaml:"policies"`
 	Git          Git                `yaml:"git"`
 	Targets      map[string]Target  `yaml:"targets"`
+	Server       Server             `yaml:"server"`
 
 	// Path holds the absolute path of the loaded config file (not a YAML key).
 	Path string `yaml:"-"`
@@ -82,6 +86,20 @@ type Orchestrator struct {
 	PollInterval    Duration `yaml:"poll_interval"`
 	JobIDPrefix     string   `yaml:"job_id_prefix"`
 	LockFile        string   `yaml:"lock_file"`
+	// StreamOutput echoes each agent action to the engine's console as it
+	// happens. Turn it off for a headless run whose stdout is a log file
+	// nobody reads; the heartbeat and the progress events stay either way.
+	StreamOutput bool `yaml:"stream_output"`
+	// HeartbeatInterval is how often a state that is still running says so.
+	// It is the only signal for a backend that prints nothing until it exits,
+	// and it is what separates "working" from "hung" in `sdlc status`.
+	// 0 disables it.
+	HeartbeatInterval Duration `yaml:"heartbeat_interval"`
+	// GateReminderInterval is how often the engine re-announces a job that is
+	// waiting for a human. A gate announced once scrolls off the console and
+	// the job then waits forever in silence, which is indistinguishable from
+	// the engine having stalled. 0 announces each gate once and never repeats.
+	GateReminderInterval Duration `yaml:"gate_reminder_interval"`
 }
 
 type Database struct {
@@ -90,18 +108,18 @@ type Database struct {
 }
 
 type Limits struct {
-	MaxJobDuration           Duration `yaml:"max_job_duration"`
-	MaxDesignReviewRounds    int      `yaml:"max_design_review_rounds"`
-	MaxCodeReviewRounds      int      `yaml:"max_code_review_rounds"`
-	MaxFixAttempts           int      `yaml:"max_fix_attempts"`
-	MaxFlakeRetries          int      `yaml:"max_flake_retries"`
-	FlakeRerunCount          int      `yaml:"flake_rerun_count"`
-	MaxAgentRetries          int      `yaml:"max_agent_retries"`
-	MaxReleaseRetries        int      `yaml:"max_release_retries"`
-	ReleaseRetryBackoff      Duration `yaml:"release_retry_backoff"`
-	MaxAgentInvocationsPerJob int     `yaml:"max_agent_invocations_per_job"`
-	LogExcerptLines          int      `yaml:"log_excerpt_lines"`
-	LogErrorPatterns         []string `yaml:"log_error_patterns"`
+	MaxJobDuration            Duration `yaml:"max_job_duration"`
+	MaxDesignReviewRounds     int      `yaml:"max_design_review_rounds"`
+	MaxCodeReviewRounds       int      `yaml:"max_code_review_rounds"`
+	MaxFixAttempts            int      `yaml:"max_fix_attempts"`
+	MaxFlakeRetries           int      `yaml:"max_flake_retries"`
+	FlakeRerunCount           int      `yaml:"flake_rerun_count"`
+	MaxAgentRetries           int      `yaml:"max_agent_retries"`
+	MaxReleaseRetries         int      `yaml:"max_release_retries"`
+	ReleaseRetryBackoff       Duration `yaml:"release_retry_backoff"`
+	MaxAgentInvocationsPerJob int      `yaml:"max_agent_invocations_per_job"`
+	LogExcerptLines           int      `yaml:"log_excerpt_lines"`
+	LogErrorPatterns          []string `yaml:"log_error_patterns"`
 	// VerifyVotes is how many independent verifiers each gating review finding
 	// is put to before it is allowed to stop the pipeline. 0 disables the
 	// verify pass entirely and every finding gates on the reviewer's word.
@@ -147,11 +165,11 @@ type Backend struct {
 	// bypassPermissions). For agy, "skip" passes
 	// --dangerously-skip-permissions (required for headless shell access —
 	// agy soft-denies shell commands otherwise); "default" passes nothing.
-	PermissionMode string `yaml:"permission_mode"`
-	PrintTimeout       Duration `yaml:"print_timeout"`        // agy only
-	SettingsFile       string   `yaml:"settings_file"`        // agy only
-	EnsurePermissions  []string `yaml:"ensure_permissions"`   // agy only
-	AssertModel        bool     `yaml:"assert_model"`         // agy only
+	PermissionMode     string   `yaml:"permission_mode"`
+	PrintTimeout       Duration `yaml:"print_timeout"`      // agy only
+	SettingsFile       string   `yaml:"settings_file"`      // agy only
+	EnsurePermissions  []string `yaml:"ensure_permissions"` // agy only
+	AssertModel        bool     `yaml:"assert_model"`       // agy only
 	QuotaErrorPatterns []string `yaml:"quota_error_patterns"`
 	QuotaBackoff       Duration `yaml:"quota_backoff"`
 	ExpectedVersion    string   `yaml:"expected_version"`
@@ -160,6 +178,14 @@ type Backend struct {
 	// {model} {effort} {prompt_file} placeholders. Prompt text is also piped
 	// to stdin.
 	ArgvTemplate []string `yaml:"argv_template"`
+	// StreamJSON asks the claude backend for --output-format stream-json
+	// (with --verbose, which that format requires) instead of a single JSON
+	// envelope at the end. It is what makes a long state legible while it
+	// runs: one line per tool call rather than nothing for twelve minutes.
+	// Off by default — it changes the CLI invocation, and older CLI builds
+	// may not accept the combination. Backends of other kinds stream whatever
+	// they print anyway and ignore this.
+	StreamJSON bool `yaml:"stream_json"`
 }
 
 type Agent struct {
@@ -191,11 +217,33 @@ type Policies struct {
 	DesignReviewBlocksAt string `yaml:"design_review_blocks_at"`
 	CodeReviewBlocksAt   string `yaml:"code_review_blocks_at"`
 	FinalReviewBlocksAt  string `yaml:"final_review_blocks_at"`
+	// HumanGates adds human checkpoints earlier than the merge gate:
+	//   spec — after design review passes, before any code is written
+	//   code — after code review passes, before build and test
+	// The merge and release gates are always enforced and need not be listed
+	// (listing them is accepted, so a config may spell out all four). Empty by
+	// default: an unattended run should not acquire a new place to stop
+	// because this key exists.
+	HumanGates []string `yaml:"human_gates"`
+}
+
+// HumanGate reports whether an optional human checkpoint is enabled.
+func (p Policies) HumanGate(name string) bool {
+	for _, g := range p.HumanGates {
+		if strings.EqualFold(strings.TrimSpace(g), name) {
+			return true
+		}
+	}
+	return false
 }
 
 type Git struct {
 	CleanupWorktrees      string `yaml:"cleanup_worktrees"` // on_success | always | never
 	DeleteBranchOnSuccess bool   `yaml:"delete_branch_on_success"`
+}
+
+type Server struct {
+	Listen string `yaml:"listen"`
 }
 
 type Target struct {
@@ -258,10 +306,13 @@ type ShipCfg struct {
 func Default() *Config {
 	return &Config{
 		Orchestrator: Orchestrator{
-			DataDir:         "./data",
-			MaxParallelJobs: 2,
-			PollInterval:    Duration(3 * time.Second),
-			JobIDPrefix:     "JOB",
+			DataDir:              "./data",
+			MaxParallelJobs:      2,
+			PollInterval:         Duration(3 * time.Second),
+			JobIDPrefix:          "JOB",
+			StreamOutput:         true,
+			HeartbeatInterval:    Duration(60 * time.Second),
+			GateReminderInterval: Duration(10 * time.Minute),
 		},
 		Database: Database{BusyTimeout: Duration(5 * time.Second)},
 		Limits: Limits{
@@ -353,8 +404,92 @@ func Default() *Config {
 			CodeReviewBlocksAt:      "blocker",
 			FinalReviewBlocksAt:     "blocker",
 		},
-		Git: Git{CleanupWorktrees: "on_success"},
+		Git:    Git{CleanupWorktrees: "on_success"},
+		Server: Server{Listen: defaultListen},
 	}
+}
+
+// defaultListen is the address a config that says nothing about the server
+// gets, and the one named in the advice below.
+const defaultListen = "127.0.0.1:7777"
+
+// loopbackAdvice is appended to every address rejected for where it binds. A
+// refusal that only says no leaves the operator with a server they cannot reach
+// from their laptop and no sanctioned way to get there, which is how the
+// address ends up at 0.0.0.0 anyway.
+const loopbackAdvice = "sdlc serve has no authentication at all, so only a loopback address may be bound — " +
+	"anything routable publishes an approve button to the network. " +
+	"Keep 127.0.0.1 and forward it instead: ssh -L 7777:127.0.0.1:7777 host"
+
+// NormalizeListen returns the exact string the caller must hand to net.Listen,
+// or reports why addr must not be bound. The caller MUST bind the returned
+// value and never the raw config value: validating one string and binding
+// another leaves a window in which the two disagree — a name resolved at bind
+// time can answer with a routable address that the check never saw — and this
+// function is the whole of `sdlc serve`'s access control.
+//
+// It is exported because `sdlc serve --addr` takes the same rule as the config
+// key, and a second copy of "which hosts count as loopback" is how the flag and
+// the file would drift.
+//
+// allowPortZero is true only for --addr: an ephemeral port the operator cannot
+// predict is not a useful thing to write in a config file, but it is exactly
+// how a test binds without racing for a fixed one.
+func NormalizeListen(addr string, allowPortZero bool) (string, error) {
+	// An empty value is the one rejection an operator can fix by deleting a
+	// line, so say that rather than reporting a malformed host:port.
+	if addr == "" {
+		return "", fmt.Errorf("is empty: delete the key to take the default %s, or name a loopback address. %s", defaultListen, loopbackAdvice)
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return "", fmt.Errorf("%q is not host:port: %v", addr, err)
+	}
+	// An empty host is not "unset", it is every interface — the one spelling of
+	// a routable bind that looks like an omission rather than a decision.
+	if host == "" {
+		return "", fmt.Errorf("%q has no host, which binds every interface. %s", addr, loopbackAdvice)
+	}
+	// "localhost" is accepted because it is what an operator types, but it is
+	// rewritten here to the literal that gets bound rather than passed through:
+	// an /etc/hosts entry mapping localhost to a routable address would
+	// otherwise sail through this check and bind that address. No name is ever
+	// looked up: a DNS answer can change after validation, and a hostname that
+	// resolves to a routable address today is exactly the case this check
+	// exists to refuse.
+	if host == "localhost" {
+		host = "127.0.0.1"
+	} else if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+		return "", fmt.Errorf("%q is not a loopback address. %s", addr, loopbackAdvice)
+	}
+	// ParseUint rather than Atoi: Atoi also accepts "+7777" and "0007777",
+	// which are not ports anybody meant to write, and its int result then needs
+	// a second range check that ParseUint's bitSize does for free.
+	n, err := strconv.ParseUint(port, 10, 16)
+	if err != nil {
+		if errors.Is(err, strconv.ErrRange) {
+			return "", fmt.Errorf("%q: port %s is out of range (1-65535)", addr, port)
+		}
+		return "", fmt.Errorf("%q: port %q is not a number", addr, port)
+	}
+	if len(port) > 1 && port[0] == '0' {
+		return "", fmt.Errorf("%q: port %q has a leading zero; write it as %d", addr, port, n)
+	}
+	if n == 0 && !allowPortZero {
+		return "", fmt.Errorf("%q: port 0 asks the kernel for whatever port is free, which nobody can then be told to open; pick one", addr)
+	}
+	return net.JoinHostPort(host, port), nil
+}
+
+// ValidateListen reports why addr must not be bound. It is a thin wrapper over
+// NormalizeListen for callers that only check — config validation, `sdlc
+// validate` — and is not enough for a caller that then binds: that one must
+// bind NormalizeListen's result.
+//
+// allowPortZero is true only for --addr, as above.
+func ValidateListen(addr string, allowPortZero bool) error {
+	_, err := NormalizeListen(addr, allowPortZero)
+	return err
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
@@ -553,6 +688,13 @@ func (c *Config) Validate() error {
 			fail("policies.%s must be blocker|major|minor|nit, got %q", key, sev)
 		}
 	}
+	for _, g := range c.Policies.HumanGates {
+		switch strings.ToLower(strings.TrimSpace(g)) {
+		case "spec", "code", "merge", "release":
+		default:
+			fail("policies.human_gates: unknown gate %q (spec|code|merge|release)", g)
+		}
+	}
 	for name, b := range c.Backends {
 		switch b.Kind {
 		case "claude", "agy":
@@ -617,6 +759,9 @@ func (c *Config) Validate() error {
 			fail("limits.verify_min_confirm (%d) cannot exceed limits.verify_votes (%d): no finding could ever survive",
 				c.Limits.VerifyMinConfirm, c.Limits.VerifyVotes)
 		}
+	}
+	if err := ValidateListen(c.Server.Listen, false); err != nil {
+		fail("server.listen %v", err)
 	}
 	for _, p := range c.Limits.LogErrorPatterns {
 		if _, err := regexp.Compile(p); err != nil {

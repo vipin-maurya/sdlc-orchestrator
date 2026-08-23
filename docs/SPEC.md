@@ -42,7 +42,10 @@ release path.
 
 - No container/VM sandboxing. Isolation = per-job git worktree + CLI-level
   tool restrictions + orchestrator-enforced diff policies (host execution).
-- No web dashboard, no Jira/GitHub integration. CLI is the only interface.
+- No Jira/GitHub integration. The interfaces are the CLI and `sdlc serve`
+  (§11), a localhost-only web UI over the same database: it has no
+  authentication, no users and no roles, its trust boundary is the machine,
+  and `server.listen` may bind only a loopback address (§12).
 - No PR flow. Merges are local (rebase + merge to the target's default
   branch, push if a remote exists).
 - No agent-run builds or tests. Gradle/adb are invoked by the orchestrator only.
@@ -109,6 +112,14 @@ AWAITING_RELEASE_APPROVAL → RELEASING → COMPLETED`
 Off-nominal states: `FLAKE_CHECK`, `ANALYZING`, `FIXING`,
 `BLOCKED_ON_QUOTA`, `ESCALATED`, `CANCELLED`, `TIMED_OUT`, `FAILED`.
 
+Optional gate states: `AWAITING_SPEC_APPROVAL` (between DESIGN_REVIEW and
+IMPLEMENTING) and `AWAITING_CODE_APPROVAL` (between CODE_REVIEW and
+BUILDING). They exist only when `policies.human_gates` lists `spec` /
+`code`; at that key's empty default the pipeline never enters them. A job
+parked in one of them on a binary that no longer knows the state is
+escalated with `no handler for state ...` — a hold with a reason, not a
+crash.
+
 Terminal states: `COMPLETED`, `CANCELLED`, `FAILED`.
 `ESCALATED` and `TIMED_OUT` are durable holds: a human can `sdlc resume`
 (re-enter a configured state) or `sdlc cancel`.
@@ -123,10 +134,14 @@ Terminal states: `COMPLETED`, `CANCELLED`, `FAILED`.
 | DESIGN_REVIEW | no finding at or above `policies.design_review_blocks_at`; any lesser findings forwarded to IMPLEMENTING | IMPLEMENTING |
 | DESIGN_REVIEW | blocking findings present, rounds < `limits.max_design_review_rounds` | PLANNING |
 | DESIGN_REVIEW | blocking findings present, rounds exhausted | ESCALATED |
+| AWAITING_SPEC_APPROVAL | `sdlc approve` | IMPLEMENTING |
+| AWAITING_SPEC_APPROVAL | `sdlc reject` | PLANNING (reason attached) or CANCELLED (`--cancel`) |
 | IMPLEMENTING | non-empty diff + implementation.json valid + every plan step accounted for; orchestrator commits | CODE_REVIEW |
 | CODE_REVIEW | no finding at or above `policies.code_review_blocks_at` | BUILDING |
 | CODE_REVIEW | blocking findings, rounds < `limits.max_code_review_rounds` | FIXING |
 | CODE_REVIEW | rounds exhausted | ESCALATED |
+| AWAITING_CODE_APPROVAL | `sdlc approve` | BUILDING |
+| AWAITING_CODE_APPROVAL | `sdlc reject` | FIXING (reason attached) or CANCELLED (`--cancel`) |
 | BUILDING | all build commands exit 0 | TESTING |
 | BUILDING | build fails | ANALYZING |
 | TESTING | unit (and enabled UI) tests pass | FINAL_REVIEW |
@@ -174,6 +189,18 @@ Notes (normative):
   threshold still describes a real problem in work nobody will revisit:
   design-review findings are staged and inlined into the IMPLEMENTING prompt,
   and final-review findings ride along on the merge-approval event.
+- **The optional human gates sit on the pass path only.** With
+  `policies.human_gates: [spec]` the DESIGN_REVIEW → IMPLEMENTING row parks
+  at AWAITING_SPEC_APPROVAL first; with `[code]` the CODE_REVIEW → BUILDING
+  row parks at AWAITING_CODE_APPROVAL. The blocking branches are unchanged —
+  a human gate is a checkpoint on a passing verdict, never a substitute for
+  one. Merge and release are always enforced and need not be listed.
+- **A human rejection spends no review-round budget.**
+  `design_review_rounds` and `code_review_rounds` count *automated* rounds
+  and gate the `max_*_rounds` escalation; charging a human "no" to them
+  would turn two of them into an ESCALATED job. The human loop is bounded by
+  `limits.max_job_duration` and `limits.max_agent_invocations_per_job`
+  instead.
 - **AWAITING_* states are durable.** The engine parks them; restart-safe;
   approval arrives via the DB from a separate `sdlc approve` invocation.
 - BLOCKED_ON_QUOTA does **not** consume retry/fix budgets.
@@ -184,6 +211,14 @@ Independent counters per job, persisted (not one shared `retry_count`):
 `design_review_rounds`, `code_review_rounds`, `fix_attempts`,
 `flake_retries`, `release_retries`, and per-state `agent_retries`
 (reset on state change). Budgets are configured under `limits.*`.
+
+The same record carries `base_sha` (the worktree head at job creation, what
+every review diffs against) and `state_entry_head` (the branch head when the
+current state began — the baseline for its diff, its post-conditions, and the
+test-file guard). `state_entry_head` is cleared on every transition and
+captured afresh from git on state entry, so commits a human made on the job
+branch while it was held belong to the baseline rather than to the agent
+(§6.1, §13.1).
 
 ### 3.4 UI testing & devices
 
@@ -300,6 +335,12 @@ Agents read inputs and write outputs through `.sdlc/` inside their worktree
   access to see the change).
 - The agent writes its output artifact(s) to `.sdlc/<name>.json`; the
   orchestrator harvests them into the artifact store after validation.
+- In IMPLEMENTING and FIXING the agent also appends one JSON object per line to
+  `.sdlc/progress.jsonl` as it finishes each unit of work
+  (`{"step":"S1","summary":"..."}`). The orchestrator watches the file and
+  commits the worktree as each line arrives (§6.1), so the unit of loss is one
+  step rather than the whole state. The file is advisory: a backend that never
+  writes it is not failed for it.
 - `.sdlc/` is added to the target repo's `.git/info/exclude`, so it never
   appears in status, diffs, or commits.
 
@@ -472,6 +513,42 @@ After IMPLEMENTING/FIXING post-conditions pass, the **orchestrator** runs
 `[sdlc <job>] <state>: <summary from artifact>`. Agents are instructed not to
 run git; any commits they do make are tolerated (HEAD movement is recorded).
 
+**Checkpoints.** During IMPLEMENTING and FIXING the orchestrator also commits
+each unit of work the agent reports in `.sdlc/progress.jsonl` (§5.0), as
+`[sdlc <job>] <state> checkpoint <step>: <summary>`. One commit per state makes
+a long implementation all-or-nothing — a 13-minute, 22-file run discarded whole
+over a malformed output file — and leaves finished work uncommitted for as long
+as the state runs, one crash-resume away from deletion. The closing
+`<state>: <summary>` commit then covers whatever the checkpoints did not, and
+is a no-op when they covered everything. A state that escalates still has its
+remaining uncommitted work preserved as `<state> (incomplete)` before the job
+parks.
+
+Because checkpoints survive a restart, a re-entered state can begin against
+part of its own work. Its baseline (`counters.state_entry_head`) is therefore
+captured once when the state is entered and persisted, never re-read per run —
+re-reading it would fold the state's own commits into its own baseline — and
+the prompt gains the same worktree-state block a retry gets, saying what is
+already on the branch and to continue rather than redo it.
+
+**Observability.** An agent state is otherwise silent for its whole duration,
+which makes a working state and a hung one indistinguishable. Three mechanisms
+apply, in order of how much the backend must cooperate:
+
+1. The agent's log is written **as output arrives**, not after the process
+   exits, so `sdlc logs <job> --last` tails a state that is still running.
+2. A heartbeat event and console line every `orchestrator.heartbeat_interval`
+   naming the state, elapsed time, action count, and last action. This is the
+   only signal for a backend that emits a single JSON envelope at the end.
+3. When the backend streams its actions (`backends.claude.stream_json`, or any
+   backend that prints progressively), each line is condensed to one
+   human-readable action — `Edit app/src/Parser.kt` — echoed to the console
+   when `orchestrator.stream_output` is set and recorded as a `progress` event
+   at most every 15s.
+
+`sdlc status <job>` prints the most recent `progress` event, so the current
+state's last known action and its age are visible without reading logs.
+
 ### 6.2 Backend adapters
 
 **claude** (headless):
@@ -612,6 +689,11 @@ clear error. Defaults: CODE_REVIEW vs IMPLEMENTING, DESIGN_REVIEW vs PLANNING.
   `limits.flake_rerun_count` times.
 - Failure log excerpts (last `limits.log_excerpt_lines` lines, plus any lines
   matching `limits.log_error_patterns`) are extracted for the ANALYZING prompt.
+- Captured output is bounded (the review patch at 4 MiB). A capture the cap
+  cut short is reported by a flag on the result, never inferred from the
+  length of the string — a patch that exactly fills the cap and one that
+  overran it are the same bytes — and a patch that stops short is labelled as
+  truncated wherever it is shown.
 
 Working dir = job worktree (MERGING verify runs there too; RELEASING runs in
 the main repo checkout). On Windows, `.bat`/`.cmd` commands are invoked via
@@ -657,7 +739,23 @@ sdlc submit  --target <key> [--title "..."] (--body "..." | --file issue.md)
 sdlc run     [--once]         start the engine (foreground; lock-file guarded).
                               --once drains runnable work then exits; default
                               runs until Ctrl-C.
+sdlc serve   [--addr host:port] [--v]
+                              serve the local web UI. Binds `server.listen`
+                              (§12); --addr overrides it and additionally
+                              allows port 0, which asks the kernel for a free
+                              one. Loopback addresses only — a non-loopback
+                              --addr is a usage error (exit 2), a non-loopback
+                              server.listen a config error (exit 1). Prints
+                              the address actually bound. --v logs every
+                              request. Ctrl-C shuts down, waiting up to 5s for
+                              requests already in flight.
 sdlc status  [job]            table of jobs / detail incl. counters, waits
+sdlc review  [job] [--diff] [--no-prompt]
+                              print what the job is waiting on you to decide;
+                              on a terminal, prompt for the decision. Prints
+                              and exits when stdin is not a terminal (pipe,
+                              cron, CI) or with --no-prompt. With no job id,
+                              walks every job waiting on a human.
 sdlc approve <job> [--note]   consume current AWAITING_* gate
 sdlc reject  <job> --reason "..." [--cancel]
 sdlc cancel  <job>
@@ -689,6 +787,10 @@ running engine picks changes up on its next tick (`orchestrator.poll_interval`).
 Approvals print a diff-stat + artifact paths so the human can review before
 approving.
 
+`sdlc serve` is another writer of the same rows through the same code, not a
+second engine: a decision recorded in the browser is the row `sdlc approve`
+writes, and the running engine picks it up on the same tick.
+
 ---
 
 ## 12. Configuration (complete reference)
@@ -705,6 +807,9 @@ orchestrator:
   poll_interval: 3s             # engine tick for DB-driven changes
   job_id_prefix: JOB            # job ids look like JOB-12
   lock_file: ${data_dir}/engine.lock   # single-engine enforcement
+  stream_output: true           # echo each agent action to the console (§6.1)
+  heartbeat_interval: 60s       # "still running" line + event; 0 disables
+  gate_reminder_interval: 10m   # re-announce open gates this often; 0 = once
 
 database:
   path: ${data_dir}/sdlc.db
@@ -750,6 +855,7 @@ backends:
     quota_backoff: 30m
     expected_version: ""        # non-empty ⇒ sdlc validate warns on mismatch
     extra_args: []
+    stream_json: false          # --output-format stream-json --verbose (§6.1)
   agy:
     binary: agy
     default_timeout: 30m
@@ -817,6 +923,8 @@ policies:
   design_review_blocks_at: major        # blocker | major | minor | nit — lowest severity
   code_review_blocks_at: blocker        # that stops the pipeline at each review gate.
   final_review_blocks_at: blocker       # Default blocker; lesser findings are forwarded, not dropped.
+  human_gates: []                       # optional earlier stops: spec | code;
+                                        # merge and release always enforced
   protect_tests_on_code_bug_fix: true   # FIXING diff may not touch test files when classification=code_bug
   test_file_globs:
     - "**/src/test/**"
@@ -828,6 +936,15 @@ policies:
 git:
   cleanup_worktrees: on_success  # on_success | always | never
   delete_branch_on_success: false
+
+server:
+  listen: 127.0.0.1:7777        # `sdlc serve` binds here. Loopback only: the
+                                # UI has no authentication, so a routable
+                                # address publishes an approve button on the
+                                # network. `localhost` is accepted and
+                                # rewritten to 127.0.0.1 before the bind; the
+                                # IPv6 loopback must be quoted ("[::1]:7777"),
+                                # because bare brackets are a YAML sequence.
 
 targets:
   expensetracker:
@@ -864,6 +981,11 @@ targets:
       auto_resume_halt: true     # run resume_command before a retry
 ```
 
+Decoding is strict, so `server:` is a key that older binaries — those built
+before `sdlc serve` existed — reject outright rather than ignore. That is why
+`sdlc.example.yaml` ships the block commented out: uncomment it only to change
+the default.
+
 ---
 
 ## 13. Guardrails summary (all orchestrator-enforced)
@@ -898,7 +1020,6 @@ internal/
   config/       schema, defaults, strict YAML decode, validation, expansion
   store/        SQLite open/migrate, single-writer, job/event/approval DAOs
   engine/       scheduler, worker pool, state machine, handlers, resume
-  states/       one handler per state (planning.go, building.go, ...)
   agent/        AgentRunner, claude/agy/exec adapters, envelope parsing
   prompt/       embedded templates, rendering, hashing
   artifact/     paths, schema validation (spec/plan/review/impl/analysis)
@@ -906,6 +1027,10 @@ internal/
   execx/        streaming command runner (timeouts, env, cmd /c handling)
   resource/     gradle-slot semaphore, device pool, emulator boot
   guard/        policy checks (test-file globs, budgets, independence)
+  jobs/         the one submit path, shared by the CLI and the web UI
+  review/       the gate document both surfaces render (block model)
+  diff/         unified-diff parser, side-by-side pairing, intra-line marks
+  server/       `sdlc serve`: local web UI (loopback only, no authentication)
 prompts/        default templates (embedded via embed.FS)
 docs/SPEC.md    this document
 sdlc.example.yaml

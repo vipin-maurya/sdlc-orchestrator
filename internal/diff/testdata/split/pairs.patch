@@ -1,0 +1,13 @@
+diff --git a/pairs.txt b/pairs.txt
+index 1111111..2222222 100644
+--- a/pairs.txt
++++ b/pairs.txt
+@@ -1,5 +1,5 @@
+ head
+-one
+-two
+-three
++ONE
++TWO
++THREE
+ tail

@@ -19,17 +19,21 @@ const (
 	// SVerifying is a configuration key, not a pipeline state: the verify
 	// pass runs inside the three review states, never as a state of its own.
 	SVerifying = config.StVerifying
+	// The spec and code gates exist only when policies.human_gates asks for
+	// them; with the key absent the pipeline never reaches these two states.
+	SAwaitSpec    = "AWAITING_SPEC_APPROVAL"
+	SAwaitCode    = "AWAITING_CODE_APPROVAL"
 	SAwaitMerge   = "AWAITING_MERGE_APPROVAL"
 	SMerging      = "MERGING"
 	SAwaitRelease = "AWAITING_RELEASE_APPROVAL"
 	SReleasing    = "RELEASING"
 
-	SCompleted     = "COMPLETED"
-	SCancelled     = "CANCELLED"
-	SFailed        = "FAILED"
-	SEscalated     = "ESCALATED"
-	STimedOut      = "TIMED_OUT"
-	SBlockedQuota  = "BLOCKED_ON_QUOTA"
+	SCompleted    = "COMPLETED"
+	SCancelled    = "CANCELLED"
+	SFailed       = "FAILED"
+	SEscalated    = "ESCALATED"
+	STimedOut     = "TIMED_OUT"
+	SBlockedQuota = "BLOCKED_ON_QUOTA"
 )
 
 // Terminal states: nothing will ever run again.
@@ -53,7 +57,7 @@ func isHeld(s string) bool {
 // Parked states: waiting on an approval row, no work to dispatch.
 func isParked(s string) bool {
 	switch s {
-	case SAwaitMerge, SAwaitRelease:
+	case SAwaitSpec, SAwaitCode, SAwaitMerge, SAwaitRelease:
 		return true
 	}
 	return false
@@ -89,6 +93,14 @@ func isAgentState(s string) bool {
 		}
 	}
 	return false
+}
+
+// producesCode reports whether a state's agent edits the source tree, and so
+// whether its progress is worth checkpointing into commits. Reviewers and the
+// planner are excluded: they must leave the tree clean, and a commit from one
+// of them would be a policy violation rather than a checkpoint.
+func producesCode(s string) bool {
+	return s == SImplementing || s == SFixing
 }
 
 // needsWorktreeReconcile lists active states whose crash-resume semantics are

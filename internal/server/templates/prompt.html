@@ -1,0 +1,16 @@
+{{/* One rendered prompt (spec §5.1). Owner: W2-H.
+
+     This is the record of what was actually sent to an agent, so it is shown
+     verbatim in a <pre> and nothing is interpreted: a prompt that was rendered
+     as markup would no longer be evidence of what the agent read. */}}
+{{define "content"}}
+{{with .Body}}
+<h1><a href="/jobs/{{.Job.ID}}">{{.Job.ID}}</a> / prompts / {{.Name}}</h1>
+<p class="muted">{{.Path}} — {{.Size}} bytes</p>
+{{if .Trimmed}}
+<p class="banner warn">Truncated: only the first 8 MiB of this file is shown. The whole
+  file is on disk at <code>{{.Path}}</code>.</p>
+{{end}}
+<pre>{{.Text}}</pre>
+{{end}}
+{{end}}
