@@ -807,6 +807,14 @@ button[disabled], form.decision[data-disabled] button {
 @media (max-width: 900px) {
   .cols { grid-template-columns: minmax(0, 1fr); }
   .cols > .side { position: static; }
+  /* Three columns, and exactly three cells to put in them. The :is() is what
+   * makes that true: .jobgrid .row .phase above sets display on the same cell
+   * at three classes deep, so a two-deep rule here loses to it and leaves a
+   * fourth cell in a three-column template — which does not overflow, it
+   * wraps, and the row silently becomes two rows tall with `since` sitting
+   * under the job id. Matching both the head and the row in one selector also
+   * keeps the two in step, which is the property the shared column template
+   * exists to guarantee. */
   .jobgrid > * { grid-template-columns: 84px minmax(0, 1fr) 76px; }
-  .jobgrid .target, .jobgrid .phase, .jobgrid .gate { display: none; }
+  .jobgrid :is(.head, .row) :is(.target, .phase, .gate) { display: none; }
 }

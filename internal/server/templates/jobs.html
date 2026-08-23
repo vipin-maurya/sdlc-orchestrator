@@ -13,10 +13,15 @@
      server is wrong by the time it is read, and the reader may be on the far
      end of an ssh -L in another timezone. */}}
 
+{{/* The header cells carry the same column classes as the data cells below
+     them. They are not needed to style the header — it has its own type — but
+     a column is dropped at a narrow width by hiding a class, and a header that
+     did not answer to that class would stay behind after its column went,
+     labelling whatever slid into its place. */}}
 {{define "gridhead"}}
 <div class="head">
-  <span>job</span><span>title</span><span>target</span>
-  <span>phase</span><span>gate</span><span class="right">since</span>
+  <span>job</span><span class="title">title</span><span class="target">target</span>
+  <span class="phase">phase</span><span class="gate">gate</span><span class="age right">since</span>
 </div>
 {{end}}
 

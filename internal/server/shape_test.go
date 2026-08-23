@@ -160,3 +160,40 @@ func TestGatePageCarriesTheQueue(t *testing.T) {
 		t.Errorf("the page carries %d approve forms; there must be exactly one", n)
 	}
 }
+
+// TestGridHeaderAnswersToItsColumnClasses pins the half of the narrow-width
+// layout that lives in the template.
+//
+// Below 900px the grid drops to three columns by hiding .target, .phase and
+// .gate. That works only if the header cells answer to the same classes as
+// the data cells: a header that did not would keep all six labels over three
+// columns, wrap onto a second line, and label whatever slid into the vacated
+// place. The CSS cannot be asserted here, but this is the half that rots — a
+// column added to the row and not to the header would reintroduce it.
+func TestGridHeaderAnswersToItsColumnClasses(t *testing.T) {
+	e := newEnv(t)
+	e.job("AWAITING_MERGE_APPROVAL", "a job to draw a row for")
+	body := getOK(t, e, "/jobs")
+
+	head := between(t, body, `<div class="head">`, "</div>")
+	for _, col := range []string{"title", "target", "phase", "gate", "age"} {
+		if !strings.Contains(head, `class="`+col+`"`) && !strings.Contains(head, `class="`+col+` `) {
+			t.Errorf("the grid header has no %q cell, so hiding that column would leave its label behind", col)
+		}
+	}
+}
+
+// between returns the text between the first open and the next close after it.
+func between(t *testing.T, s, open, close string) string {
+	t.Helper()
+	i := strings.Index(s, open)
+	if i < 0 {
+		t.Fatalf("the page does not contain %q", open)
+	}
+	rest := s[i+len(open):]
+	k := strings.Index(rest, close)
+	if k < 0 {
+		t.Fatalf("%q is never closed by %q", open, close)
+	}
+	return rest[:k]
+}
