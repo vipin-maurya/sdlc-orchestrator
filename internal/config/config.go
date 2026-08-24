@@ -548,16 +548,27 @@ func Load(path string) (*Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	return Parse(raw, abs)
+}
+
+// Parse runs raw through exactly the pipeline Load runs a file's bytes
+// through — env expansion, strict decode over Default(), computed defaults,
+// Validate — and stamps the result with path (which need not exist on disk;
+// it becomes Config.Path and the base for applyComputedDefaults' relative
+// fields). It exists so a second source of config text — a POST body, before
+// anything is written anywhere — is held to the identical bar a file on disk
+// would be, by construction rather than by two implementations agreeing.
+func Parse(raw []byte, path string) (*Config, error) {
 	cfg := Default()
 	dec := yaml.NewDecoder(strings.NewReader(expandEnv(string(raw))))
 	dec.KnownFields(true)
 	if err := dec.Decode(cfg); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", abs, err)
+		return nil, fmt.Errorf("parse %s: %w", path, err)
 	}
-	cfg.Path = abs
+	cfg.Path = path
 	cfg.applyComputedDefaults()
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("%s: %w", abs, err)
+		return nil, fmt.Errorf("%s: %w", path, err)
 	}
 	return cfg, nil
 }
