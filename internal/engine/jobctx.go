@@ -41,7 +41,7 @@ func jsonStr(v any) string {
 	return string(b)
 }
 
-func (c *jobCtx) dataDir() string    { return c.e.cfg.Orchestrator.DataDir }
+func (c *jobCtx) dataDir() string    { return c.e.cfg.Get().Orchestrator.DataDir }
 func (c *jobCtx) artDir() string     { return artifact.ArtifactsDir(c.dataDir(), c.job.ID) }
 func (c *jobCtx) logsDir() string    { return artifact.LogsDir(c.dataDir(), c.job.ID) }
 func (c *jobCtx) promptsDir() string { return artifact.PromptsDir(c.dataDir(), c.job.ID) }
@@ -160,12 +160,12 @@ func (c *jobCtx) excerpt(logPath string) string {
 		return "(no log recorded)"
 	}
 	var pats []*regexp.Regexp
-	for _, p := range c.e.cfg.Limits.LogErrorPatterns {
+	for _, p := range c.e.cfg.Get().Limits.LogErrorPatterns {
 		if re, err := regexp.Compile(p); err == nil {
 			pats = append(pats, re)
 		}
 	}
-	return execx.Excerpt(logPath, c.e.cfg.Limits.LogExcerptLines, pats)
+	return execx.Excerpt(logPath, c.e.cfg.Get().Limits.LogExcerptLines, pats)
 }
 
 // normPath canonicalises a path an agent reported so it can be compared with
@@ -314,12 +314,12 @@ func (c *jobCtx) priorWorkNote(ctx context.Context, maxRetries int, stateHead st
 // the state's post-condition; it runs after every attempt. Returns quotaErr
 // for rate limits and escalate() when retries are exhausted.
 func (c *jobCtx) runAgent(ctx context.Context, state string, pctx prompt.Ctx, validate func() error) error {
-	agentName, ag, backend, stCfg, err := c.e.cfg.AgentFor(state)
+	agentName, ag, backend, stCfg, err := c.e.cfg.Get().AgentFor(state)
 	if err != nil {
 		return err
 	}
-	cfgDir := filepath.Dir(c.e.cfg.Path)
-	maxRetries := c.e.cfg.Limits.MaxAgentRetries
+	cfgDir := filepath.Dir(c.e.cfg.Get().Path)
+	maxRetries := c.e.cfg.Get().Limits.MaxAgentRetries
 	// Head at state entry: the baseline a retry's "what did the last run
 	// already do" summary is computed against. Persisted with the job, so it
 	// survives a restart that leaves this state's checkpoints on the branch.
@@ -329,7 +329,7 @@ func (c *jobCtx) runAgent(ctx context.Context, state string, pctx prompt.Ctx, va
 	}
 	var lastErr error
 	for attempt := 0; attempt <= maxRetries; attempt++ {
-		if c.job.Counters.AgentInvocations >= c.e.cfg.Limits.MaxAgentInvocationsPerJob {
+		if c.job.Counters.AgentInvocations >= c.e.cfg.Get().Limits.MaxAgentInvocationsPerJob {
 			return escalate("agent budget exhausted (%d invocations)", c.job.Counters.AgentInvocations)
 		}
 		text, hash, err := prompt.Render(state, stCfg.Prompt, cfgDir, pctx)
@@ -436,7 +436,7 @@ func (c *jobCtx) runAgent(ctx context.Context, state string, pctx prompt.Ctx, va
 // requireCleanTree enforces reviewer immutability (SPEC §13.2): review and
 // analyze states must not modify the tree. Any dirt is discarded and reported.
 func (c *jobCtx) requireCleanTree(ctx context.Context) error {
-	if !c.e.cfg.Policies.ReviewerDiffMustBeEmpty {
+	if !c.e.cfg.Get().Policies.ReviewerDiffMustBeEmpty {
 		return nil
 	}
 	dirty, err := c.repo.IsDirty(ctx, c.job.WorktreePath)

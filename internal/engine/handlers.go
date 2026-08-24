@@ -19,7 +19,7 @@ func (c *jobCtx) handleCreated(ctx context.Context) (string, error) {
 	if err := c.repo.GitOK(ctx); err != nil {
 		return "", fmt.Errorf("target repo %s is not a git repository: %w", c.target.RepoPath, err)
 	}
-	for _, pb := range c.e.cfg.Policies.ProtectedBranches {
+	for _, pb := range c.e.cfg.Get().Policies.ProtectedBranches {
 		if c.job.Branch == pb {
 			return "", fmt.Errorf("job branch %q is a protected branch", c.job.Branch)
 		}
@@ -42,7 +42,7 @@ func (c *jobCtx) handleCreated(ctx context.Context) (string, error) {
 	if err := c.e.st.UpdateJob(c.job); err != nil {
 		return "", err
 	}
-	if !c.e.cfg.Policies.ScopingEnabled() {
+	if !c.e.cfg.Get().Policies.ScopingEnabled() {
 		return SPlanning, nil
 	}
 	return SScoping, nil
@@ -53,7 +53,7 @@ func (c *jobCtx) handleCreated(ctx context.Context) (string, error) {
 func (c *jobCtx) handleScoping(ctx context.Context) (string, error) {
 	// Check the budget before dispatching, not after: an agent invocation
 	// spent on a round that can never be accepted is pure cost.
-	if c.job.Counters.ScopeRounds >= c.e.cfg.Limits.MaxScopeRounds {
+	if c.job.Counters.ScopeRounds >= c.e.cfg.Get().Limits.MaxScopeRounds {
 		return "", escalate("scope still unresolved after %d round(s); see problem.json and the gate history",
 			c.job.Counters.ScopeRounds)
 	}
@@ -62,7 +62,7 @@ func (c *jobCtx) handleScoping(ctx context.Context) (string, error) {
 	}
 	pctx := c.baseCtx()
 	pctx.Round = c.job.Counters.ScopeRounds + 1
-	pctx.MaxRounds = c.e.cfg.Limits.MaxScopeRounds
+	pctx.MaxRounds = c.e.cfg.Get().Limits.MaxScopeRounds
 	rejected := c.job.Counters.HumanRejectReason
 	// Stage the previous statement whenever there is one to revise. Keying this
 	// on the counter alone would send the agent back in with nothing to answer
@@ -104,7 +104,7 @@ func (c *jobCtx) handleScoping(ctx context.Context) (string, error) {
 		})
 		return SAwaitScope, nil
 	}
-	if c.e.cfg.Policies.HumanGate("scope") {
+	if c.e.cfg.Get().Policies.HumanGate("scope") {
 		c.e.event(c.job, "note", map[string]any{
 			"awaiting_scope_approval": true, "reason": "policy_gate",
 			"clarity": prob.Clarity, "assumptions": len(prob.Assumptions),
@@ -124,7 +124,7 @@ func (c *jobCtx) handlePlanning(ctx context.Context) (string, error) {
 	pctx := c.baseCtx()
 	pctx.ScopedProblem = c.problemJSON()
 	pctx.Round = c.job.Counters.DesignReviewRounds + 1
-	pctx.MaxRounds = c.e.cfg.Limits.MaxDesignReviewRounds
+	pctx.MaxRounds = c.e.cfg.Get().Limits.MaxDesignReviewRounds
 	rejected := c.job.Counters.HumanRejectReason
 	// Stage the scoped problem statement whenever one exists.
 	c.stageArtifact("problem.json")
@@ -181,7 +181,7 @@ func (c *jobCtx) handleDesignReview(ctx context.Context) (string, error) {
 	pctx := c.baseCtx()
 	pctx.ScopedProblem = c.problemJSON()
 	pctx.Round = round
-	pctx.MaxRounds = c.e.cfg.Limits.MaxDesignReviewRounds
+	pctx.MaxRounds = c.e.cfg.Get().Limits.MaxDesignReviewRounds
 	reviewPath := filepath.Join(c.sdlcDir(), "review.json")
 	err := c.runAgent(ctx, SDesignReview, pctx, func() error {
 		if _, err := artifact.LoadReview(reviewPath); err != nil {
@@ -200,7 +200,7 @@ func (c *jobCtx) handleDesignReview(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	threshold := c.e.cfg.Policies.DesignReviewBlocksAt
+	threshold := c.e.cfg.Get().Policies.DesignReviewBlocksAt
 	// Nothing downstream can tell a correct finding from a fluent wrong one, so
 	// anything about to gate is put to independent verifiers first. rev is
 	// updated in place: refuted findings survive as annotated nits.
@@ -209,7 +209,7 @@ func (c *jobCtx) handleDesignReview(ctx context.Context) (string, error) {
 	}
 	if blocking := rev.Blocking(threshold); len(blocking) > 0 {
 		c.job.Counters.DesignReviewRounds = round
-		if round >= c.e.cfg.Limits.MaxDesignReviewRounds {
+		if round >= c.e.cfg.Get().Limits.MaxDesignReviewRounds {
 			return "", escalate("design review still has %d finding(s) at or above %s after %d round(s); see %s",
 				len(blocking), threshold, round, name)
 		}
@@ -232,7 +232,7 @@ func (c *jobCtx) handleDesignReview(ctx context.Context) (string, error) {
 	// purpose: approving into IMPLEMENTING must still forward the non-blocking
 	// findings, or the checkpoint the operator asked for becomes the place
 	// those findings quietly disappear.
-	if c.e.cfg.Policies.HumanGate("spec") {
+	if c.e.cfg.Get().Policies.HumanGate("spec") {
 		c.e.event(c.job, "note", map[string]any{
 			"awaiting_spec_approval": true,
 			"design_summary":         rev.Summary,
@@ -335,7 +335,7 @@ func (c *jobCtx) handleCodeReview(ctx context.Context) (string, error) {
 	}
 	pctx := c.baseCtx()
 	pctx.Round = round
-	pctx.MaxRounds = c.e.cfg.Limits.MaxCodeReviewRounds
+	pctx.MaxRounds = c.e.cfg.Get().Limits.MaxCodeReviewRounds
 	if round > 1 {
 		pctx.PrevFindings = c.findingsJSON(c.preferVerified(fmt.Sprintf("code_review.r%d.json", round-1)))
 	}
@@ -357,19 +357,19 @@ func (c *jobCtx) handleCodeReview(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	threshold := c.e.cfg.Policies.CodeReviewBlocksAt
+	threshold := c.e.cfg.Get().Policies.CodeReviewBlocksAt
 	if _, err := c.verifyFindings(ctx, rev, name, threshold); err != nil {
 		return "", err
 	}
 	if blocking := rev.Blocking(threshold); len(blocking) > 0 {
 		c.job.Counters.CodeReviewRounds = round
-		if round >= c.e.cfg.Limits.MaxCodeReviewRounds {
+		if round >= c.e.cfg.Get().Limits.MaxCodeReviewRounds {
 			return "", escalate("code review still has %d finding(s) at or above %s after %d round(s); see %s",
 				len(blocking), threshold, round, name)
 		}
-		if c.job.Counters.FixAttempts >= c.e.cfg.Limits.MaxFixAttempts {
+		if c.job.Counters.FixAttempts >= c.e.cfg.Get().Limits.MaxFixAttempts {
 			return "", escalate("code review has %d finding(s) at or above %s but fix budget (%d) is exhausted",
-				len(blocking), threshold, c.e.cfg.Limits.MaxFixAttempts)
+				len(blocking), threshold, c.e.cfg.Get().Limits.MaxFixAttempts)
 		}
 		c.job.Counters.FixSource = "code_review"
 		return SFixing, nil
@@ -377,7 +377,7 @@ func (c *jobCtx) handleCodeReview(ctx context.Context) (string, error) {
 	// A human gate is a checkpoint on the pass path only. The blocking branch
 	// above still routes to FIXING without asking anybody: the automated
 	// verdict is not something a human is invited to override here.
-	if c.e.cfg.Policies.HumanGate("code") {
+	if c.e.cfg.Get().Policies.HumanGate("code") {
 		stat, _ := c.repo.DiffStatSince(ctx, c.job.WorktreePath, c.job.Counters.BaseSHA)
 		c.e.event(c.job, "note", map[string]any{
 			"awaiting_code_approval": true, "diff_stat": stat, "code_review_summary": rev.Summary,
@@ -508,7 +508,7 @@ func (c *jobCtx) handleFlakeCheck(ctx context.Context) (string, error) {
 	if releaseDevice != nil {
 		defer releaseDevice()
 	}
-	n := c.e.cfg.Limits.FlakeRerunCount
+	n := c.e.cfg.Get().Limits.FlakeRerunCount
 	passes := 0
 	for i := 0; i < n; i++ {
 		// Three full suite reruns look identical from outside without this:
@@ -529,7 +529,7 @@ func (c *jobCtx) handleFlakeCheck(ctx context.Context) (string, error) {
 	if passes > 0 {
 		// Non-deterministic ⇒ flaky.
 		c.job.Counters.FlakeRetries++
-		if c.job.Counters.FlakeRetries > c.e.cfg.Limits.MaxFlakeRetries {
+		if c.job.Counters.FlakeRetries > c.e.cfg.Get().Limits.MaxFlakeRetries {
 			return "", escalate("phase %s is flaky (%d/%d reruns passed) and limits.max_flake_retries exhausted", phase, passes, n)
 		}
 		return STesting, nil
@@ -575,8 +575,8 @@ func (c *jobCtx) handleAnalyzing(ctx context.Context) (string, error) {
 	case "unknown":
 		return "", escalate("failure classification unknown: %s", an.Reasoning)
 	}
-	if c.job.Counters.FixAttempts >= c.e.cfg.Limits.MaxFixAttempts {
-		return "", escalate("%s diagnosed but fix budget (%d) is exhausted", an.Classification, c.e.cfg.Limits.MaxFixAttempts)
+	if c.job.Counters.FixAttempts >= c.e.cfg.Get().Limits.MaxFixAttempts {
+		return "", escalate("%s diagnosed but fix budget (%d) is exhausted", an.Classification, c.e.cfg.Get().Limits.MaxFixAttempts)
 	}
 	c.job.Counters.LastAnalysis = an.Classification
 	c.job.Counters.FixSource = "analysis"
@@ -597,7 +597,7 @@ func (c *jobCtx) handleFixing(ctx context.Context) (string, error) {
 	}
 	pctx := c.baseCtx()
 	pctx.Round = attempt
-	pctx.MaxRounds = c.e.cfg.Limits.MaxFixAttempts
+	pctx.MaxRounds = c.e.cfg.Get().Limits.MaxFixAttempts
 	classification := ""
 	switch c.job.Counters.FixSource {
 	case "analysis":
@@ -660,11 +660,11 @@ func (c *jobCtx) handleFixing(ctx context.Context) (string, error) {
 	}
 
 	// Test-file policy (SPEC §13.1): mechanical, orchestrator-side.
-	globs, err := guard.CompileGlobs(c.e.cfg.Policies.TestFileGlobs)
+	globs, err := guard.CompileGlobs(c.e.cfg.Get().Policies.TestFileGlobs)
 	if err != nil {
 		return "", err
 	}
-	if viol := guard.CheckFixDiff(changed, classification, c.e.cfg.Policies.ProtectTestsOnCodeBugFix, globs); len(viol) > 0 {
+	if viol := guard.CheckFixDiff(changed, classification, c.e.cfg.Get().Policies.ProtectTestsOnCodeBugFix, globs); len(viol) > 0 {
 		_ = c.repo.ResetHardClean(ctx, c.job.WorktreePath, entryHead)
 		// The fix agent's own checkpoints went with the reset. Move the record
 		// back with the branch: leaving it on a commit the branch no longer
@@ -713,12 +713,12 @@ func (c *jobCtx) handleFinalReview(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	threshold := c.e.cfg.Policies.FinalReviewBlocksAt
+	threshold := c.e.cfg.Get().Policies.FinalReviewBlocksAt
 	if _, err := c.verifyFindings(ctx, rev, "final_review.json", threshold); err != nil {
 		return "", err
 	}
 	if blocking := rev.Blocking(threshold); len(blocking) > 0 {
-		if c.job.Counters.FixAttempts >= c.e.cfg.Limits.MaxFixAttempts {
+		if c.job.Counters.FixAttempts >= c.e.cfg.Get().Limits.MaxFixAttempts {
 			return "", escalate("final review has %d finding(s) at or above %s and fix budget is exhausted",
 				len(blocking), threshold)
 		}
@@ -827,10 +827,10 @@ func (c *jobCtx) handleReleasing(ctx context.Context) (string, error) {
 		return SCompleted, nil
 	}
 	c.job.Counters.ReleaseRetries = attempt
-	if attempt > c.e.cfg.Limits.MaxReleaseRetries {
+	if attempt > c.e.cfg.Get().Limits.MaxReleaseRetries {
 		return "", escalate("ship command failed %d times; last log: %s", attempt, logPath)
 	}
-	c.job.ResumeAfter = time.Now().Add(c.e.cfg.Limits.ReleaseRetryBackoff.D())
+	c.job.ResumeAfter = time.Now().Add(c.e.cfg.Get().Limits.ReleaseRetryBackoff.D())
 	c.e.event(c.job, "note", map[string]any{"ship_failed": true, "attempt": attempt, "retry_after": c.job.ResumeAfter, "log": logPath})
 	return SReleasing, nil
 }

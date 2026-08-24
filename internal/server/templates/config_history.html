@@ -1,0 +1,38 @@
+{{/* The config history listing (spec §5.1). Owner: W2-H.
+
+     One entry per saved-over version, written by config.Live.Apply's own
+     write path (writeWithBackup, internal/config/live.go) before it
+     overwrites the file — not by anything in this package. Newest first,
+     because the version an operator opens this page to look at is almost
+     always the one just before whatever is on disk now. */}}
+{{define "content"}}
+{{with .Body}}
+<h1>Config history</h1>
+{{if .Dir}}<p class="muted">{{.Dir}}</p>{{end}}
+<p class="note">Every save backs up the version it replaces here before writing the
+  new one, kept newest-first and pruned to the most recent 50. Open a version to read
+  it, or load it back into the <a href="/config">editor</a> — loading never saves by
+  itself; that still takes an explicit Save.</p>
+
+{{if .Missing}}
+<p class="banner">No saved history yet — either no config file is loaded, or nothing
+  has been saved through this page (or through config.Live.Apply) since this data
+  directory was created.</p>
+{{else if not .Files}}
+<p class="muted">The directory is empty.</p>
+{{else}}
+<table>
+  <thead><tr><th>Name</th><th>Bytes</th><th>Modified</th></tr></thead>
+  <tbody>
+  {{range .Files}}
+    <tr>
+      <td><a href="{{.Href}}">{{.Name}}</a></td>
+      <td class="num">{{.Size}}</td>
+      <td><time datetime="{{rfc3339 .ModTime}}">{{rfc3339 .ModTime}}</time></td>
+    </tr>
+  {{end}}
+  </tbody>
+</table>
+{{end}}
+{{end}}
+{{end}}

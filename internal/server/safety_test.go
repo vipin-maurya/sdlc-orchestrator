@@ -185,9 +185,13 @@ func TestEmptyHostIsRefused(t *testing.T) {
 
 // --- CSRF ----------------------------------------------------------------
 
-// TestCSRFRequiredOnEveryPost walks every POST in spec §5.2. The double-submit
-// pair is the whole defence: there is no session to compare against, because
-// there are no users (spec §2.2).
+// TestCSRFRequiredOnEveryPost walks every POST in spec §5.2, plus POST
+// /config: that handler is the one deliberate exception to "every POST
+// answers 303" (see the comment at handleConfigSave), but it is not an
+// exception to CSRF — requireCSRF wraps it exactly like every other POST
+// here, and this table is what proves that rather than a parallel check off
+// to the side. The double-submit pair is the whole defence: there is no
+// session to compare against, because there are no users (spec §2.2).
 func TestCSRFRequiredOnEveryPost(t *testing.T) {
 	e := newEnv(t)
 	j := e.job("AWAITING_MERGE_APPROVAL", "t")
@@ -199,6 +203,7 @@ func TestCSRFRequiredOnEveryPost(t *testing.T) {
 		"/jobs/" + j.ID + "/cancel",
 		"/submit",
 		"/prefs/diff-view",
+		"/config",
 	}
 	cases := []struct {
 		name   string

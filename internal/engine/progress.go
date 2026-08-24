@@ -80,7 +80,7 @@ func (w *watcher) onProgress(line string) {
 	}
 	w.mu.Unlock()
 
-	if w.c.e.cfg.Orchestrator.StreamOutput {
+	if w.c.e.cfg.Get().Orchestrator.StreamOutput {
 		w.c.e.logger.Printf("%s: %s [%s] %s", w.c.job.ID, w.state, elapsed(w.start), line)
 	}
 	if emit {
@@ -94,7 +94,7 @@ func (w *watcher) onProgress(line string) {
 // run starts the heartbeat and, when the agent reports completed plan steps,
 // the checkpoint committer. Call stopWait when the agent returns.
 func (w *watcher) run(ctx context.Context, checkpoint bool) {
-	if hb := w.c.e.cfg.Orchestrator.HeartbeatInterval.D(); hb > 0 {
+	if hb := w.c.e.cfg.Get().Orchestrator.HeartbeatInterval.D(); hb > 0 {
 		w.done.Add(1)
 		go w.heartbeat(ctx, hb)
 	}

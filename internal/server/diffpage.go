@@ -131,7 +131,7 @@ func (s *Server) persistedPatch(j *store.Job) (string, bool) {
 		gates = append([]string{g}, gates...)
 	}
 	for _, g := range gates {
-		b, err := os.ReadFile(review.DiffPath(s.cfg.Orchestrator.DataDir, j.ID, g))
+		b, err := os.ReadFile(review.DiffPath(s.cfg.Get().Orchestrator.DataDir, j.ID, g))
 		if err == nil && len(b) > 0 {
 			return string(b), true
 		}
@@ -392,7 +392,7 @@ func (s *Server) fillFiles(p *diffPage, res patchResult) {
 // costs the badge and nothing else — the diff itself is what this page is for,
 // and refusing to render it over a bad pattern would be a strange trade.
 func (s *Server) testGlobs() guard.GlobSet {
-	set, err := guard.CompileGlobs(s.cfg.Policies.TestFileGlobs)
+	set, err := guard.CompileGlobs(s.cfg.Get().Policies.TestFileGlobs)
 	if err != nil {
 		s.log.Printf("policies.test_file_globs does not compile, so no test badges: %v", err)
 		return nil

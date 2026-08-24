@@ -30,6 +30,13 @@ import (
 
 const Version = "0.1.0"
 
+// configWatchInterval is how often `sdlc run` and `sdlc serve` each poll
+// sdlc.yaml for changes via their own config.Live.Watch loop. It is
+// infrastructure for the config system, not a setting the config system
+// itself governs — it must never become an sdlc.yaml key, or the interval
+// that governs reload would itself need to be reloaded to change.
+const configWatchInterval = 2 * time.Second
+
 const usage = `sdlc — autonomous SDLC orchestrator
 
 Usage:
@@ -242,7 +249,13 @@ func cmdRun(cfg *config.Config, args []string) int {
 	defer st.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	eng := engine.New(cfg, st, log.New(os.Stdout, "", log.LstdFlags))
+	logger := log.New(os.Stdout, "", log.LstdFlags)
+	// live is this process's own config.Live; sdlc serve, if also running,
+	// has its own — the two only ever agree through the file on disk, exactly
+	// like a person hand-editing it would cause either to notice.
+	live := config.NewLive(cfg)
+	go live.Watch(ctx, configWatchInterval, logger)
+	eng := engine.New(live, st, logger)
 	if err := eng.Run(ctx, *once); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1

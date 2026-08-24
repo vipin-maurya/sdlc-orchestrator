@@ -20,9 +20,13 @@ type route struct {
 	path   string
 }
 
-// specRoutes is every route in spec §5.1, §5.2 and §5.3. {id} is JOB-1 and
-// {name}/{index} are values the fixture can resolve or that a stub answers.
-func specRoutes(assetURL string) []route {
+// specRoutes is every route in spec §5.1, §5.2 and §5.3. {id} is JOB-1,
+// {name}/{index} are values the fixture can resolve or that a stub answers,
+// and historyName is a real entry in the config history directory — see
+// TestEveryRouteResolves, which creates one before calling this — so that a
+// 404 there is unambiguously "the route is not registered" and not "there
+// happens to be no history yet".
+func specRoutes(assetURL, historyName string) []route {
 	return []route{
 		// 5.1 pages
 		{"GET", "/"},
@@ -40,6 +44,8 @@ func specRoutes(assetURL string) []route {
 		{"GET", "/jobs/JOB-1/prompts/planning.md"},
 		{"GET", "/submit"},
 		{"GET", "/config"},
+		{"GET", "/config/history"},
+		{"GET", "/config/history/" + historyName},
 		{"GET", assetURL},
 		{"GET", "/healthz"},
 		// 5.2 actions
@@ -49,6 +55,7 @@ func specRoutes(assetURL string) []route {
 		{"POST", "/jobs/JOB-1/cancel"},
 		{"POST", "/submit"},
 		{"POST", "/prefs/diff-view"},
+		{"POST", "/config"},
 		// 5.3 live and data
 		{"GET", "/events/stream"},
 		{"GET", "/api/jobs.json"},
@@ -64,8 +71,9 @@ func specRoutes(assetURL string) []route {
 func TestEveryRouteResolves(t *testing.T) {
 	e := newEnv(t)
 	e.job("AWAITING_MERGE_APPROVAL", "a job to resolve routes against")
+	historyName := e.configHistoryEntry("20200101T000000.000000000Z-sdlc.yaml", "orchestrator: {}\n")
 
-	for _, rt := range specRoutes(e.srv.assets["app.css"]) {
+	for _, rt := range specRoutes(e.srv.assets["app.css"], historyName) {
 		t.Run(rt.method+" "+rt.path, func(t *testing.T) {
 			var res *http.Response
 			if rt.method == "GET" {

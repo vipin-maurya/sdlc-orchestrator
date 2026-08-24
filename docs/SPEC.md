@@ -1015,6 +1015,40 @@ before `sdlc serve` existed — reject outright rather than ignore. That is why
 `sdlc.example.yaml` ships the block commented out: uncomment it only to change
 the default.
 
+### 12.1 Live reload
+
+`sdlc run` and `sdlc serve` are each long-lived processes, and each
+independently watches `sdlc.yaml` for changes and reloads it while running —
+polling the file's mtime and size on its own timer, re-parsing and
+re-validating only when one has moved. The two processes never talk to each
+other directly; a config edit becomes live in both only because both are
+watching the same file. An edit that fails to parse or fails validation is
+refused: the process keeps running on the config it already had, unaffected.
+
+Four settings are the exception and still require a restart, because each is
+already baked into a resource the process opened before the edit arrived,
+not something re-read at point of use:
+
+- `orchestrator.data_dir` — job directories any in-flight job already has
+  open would not move.
+- `orchestrator.lock_file` — the process would be left holding a lock at a
+  path it no longer reports.
+- the `database` block (`database.path`, `database.busy_timeout`) — the open
+  `sql.Open` connection would not reopen against a new path or timeout.
+- `server.listen` — a bound listener cannot be rebound from inside the
+  handler running on it.
+
+An edit touching any of those is refused exactly like an invalid one: the
+process reports what needs a restart and keeps running on the previous
+values. Every other key is read fresh at its point of use throughout the
+codebase, so a change to it is live the moment the edit is accepted — no
+entry in the list above, no restart.
+
+`sdlc serve`'s `/config` page can write to the file directly, in addition to
+reading it: a save goes through the same validate-then-swap path a watched
+file edit does, so a save that would require a restart, or that fails to
+validate, is refused before it reaches disk.
+
 ---
 
 ## 13. Guardrails summary (all orchestrator-enforced)

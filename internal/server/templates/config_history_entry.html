@@ -1,0 +1,19 @@
+{{/* One saved config version, read-only (spec §5.1). Owner: W2-H.
+
+     "Load into editor" is a GET to /config with ?load=<name>, which pre-fills
+     the textarea there with this text and says so — it does not save
+     anything by itself. Restoring an old version still needs an explicit
+     second Save on that page, the same "no one-click destructive action"
+     pattern the cancel confirmation on a job uses. */}}
+{{define "content"}}
+{{with .Body}}
+<h1><a href="/config/history">Config history</a> / {{.Name}}</h1>
+<p class="muted">{{.Path}}</p>
+
+<p class="note">Read-only. <a href="{{.LoadHref}}">Load into the editor</a> to
+  bring this text into <a href="/config">the config page</a> — that does not save it;
+  saving still takes an explicit Save there.</p>
+
+<pre>{{.Text}}</pre>
+{{end}}
+{{end}}

@@ -423,7 +423,7 @@ func (e *env) runEngine() {
 	e.t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	eng := New(e.cfg, e.st, log.New(os.Stderr, "[engine] ", 0))
+	eng := New(config.NewLive(e.cfg), e.st, log.New(os.Stderr, "[engine] ", 0))
 	if err := eng.Run(ctx, true); err != nil {
 		e.t.Fatalf("engine: %v", err)
 	}
@@ -459,7 +459,7 @@ func (e *env) runEngineLogged() string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	buf := &syncBuf{}
-	eng := New(e.cfg, e.st, log.New(buf, "", 0))
+	eng := New(config.NewLive(e.cfg), e.st, log.New(buf, "", 0))
 	if err := eng.Run(ctx, true); err != nil {
 		e.t.Fatalf("engine: %v", err)
 	}

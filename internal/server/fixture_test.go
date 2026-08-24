@@ -7,6 +7,7 @@ package server
 
 import (
 	"database/sql"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -27,12 +28,13 @@ import (
 )
 
 type env struct {
-	t   *testing.T
-	tmp string
-	cfg *config.Config
-	st  *store.Store
-	srv *Server
-	ts  *httptest.Server
+	t    *testing.T
+	tmp  string
+	cfg  *config.Config // a snapshot: live.Get() at fixture construction time
+	live *config.Live
+	st   *store.Store
+	srv  *Server
+	ts   *httptest.Server
 
 	// csrf is the token the fixture's cookie jar holds, captured from the
 	// first response. post() sends it in both halves of the double-submit
@@ -40,37 +42,66 @@ type env struct {
 	csrf string
 }
 
+// fixtureConfigYAML is what newEnv writes to disk and loads through
+// config.Load — the real pipeline `sdlc serve` uses, not a struct built in
+// memory and handed to New directly, because the config edit surface under
+// test reads and writes s.cfg.Get().Path and Live.Apply needs a real file to
+// back up and rewrite. Only what differs from config.Default() is spelled
+// out, the same minimal-target shape internal/config's own tests use:
+// build.commands and unit_test.command are the two fields Validate requires
+// non-empty on a target, and the commands themselves never run.
+const fixtureConfigYAML = `
+orchestrator:
+  data_dir: %s
+  lock_file: %s
+database:
+  path: %s
+targets:
+  demo:
+    repo_path: %s
+    default_branch: main
+    branch_prefix: sdlc/
+    build: { commands: [["true"]] }
+    unit_test: { command: ["true"] }
+    ship: { command: ["scripts", "ship.sh"] }
+`
+
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	tmp := t.TempDir()
-	cfg := config.Default()
-	cfg.Orchestrator.DataDir = filepath.Join(tmp, "data")
-	cfg.Orchestrator.LockFile = filepath.Join(tmp, "data", "engine.lock")
-	cfg.Database.Path = filepath.Join(tmp, "data", "sdlc.db")
-	cfg.Targets = map[string]config.Target{
-		"demo": {
-			RepoPath:      filepath.Join(tmp, "repo"),
-			DefaultBranch: "main",
-			BranchPrefix:  "sdlc/",
-			Ship:          config.ShipCfg{Command: []string{"scripts", "ship.sh"}},
-		},
+	dataDir := filepath.Join(tmp, "data")
+	raw := fmt.Sprintf(fixtureConfigYAML,
+		dataDir,
+		filepath.Join(dataDir, "engine.lock"),
+		filepath.Join(dataDir, "sdlc.db"),
+		filepath.Join(tmp, "repo"))
+	path := filepath.Join(tmp, "sdlc.yaml")
+	if err := os.WriteFile(path, []byte(raw), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	st, err := store.Open(cfg.Database.Path, time.Second)
+	loaded, err := config.Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := store.Open(loaded.Database.Path, time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
 
+	live := config.NewLive(loaded)
+
 	// A logger to io.Discard: a panic test writes a stack, and a test run whose
 	// output is mostly stack traces hides the failures.
-	srv, err := New(cfg, st, log.New(io.Discard, "", 0), false)
+	srv, err := New(live, st, log.New(io.Discard, "", 0), false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 
-	e := &env{t: t, tmp: tmp, cfg: cfg, st: st, srv: srv, ts: ts}
+	e := &env{t: t, tmp: tmp, cfg: loaded, live: live, st: st, srv: srv, ts: ts}
 	e.csrf = e.freshToken()
 	return e
 }
@@ -310,4 +341,21 @@ func (e *env) engineLock() {
 	if err := os.WriteFile(e.cfg.Orchestrator.LockFile, []byte("1"), 0o644); err != nil {
 		e.t.Fatal(err)
 	}
+}
+
+// configHistoryEntry writes a file directly into this env's config history
+// directory and returns its name, for tests that need one real, resolvable
+// entry without going through a live edit (config.Live.Apply's own tests, in
+// internal/config, already cover that backups are written correctly — what
+// this package needs is just a fixture the history routes can serve).
+func (e *env) configHistoryEntry(name, content string) string {
+	e.t.Helper()
+	dir := configHistoryDir(e.cfg.Path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		e.t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		e.t.Fatal(err)
+	}
+	return name
 }

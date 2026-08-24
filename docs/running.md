@@ -327,13 +327,12 @@ sdlc serve listening on http://127.0.0.1:7777/
 Ctrl-C shuts it down and waits up to 5s for requests already in flight, so an
 approval POST mid-write is not cut off.
 
-The UI is read-and-decide: the job list and job detail, the gate document with
-the approve/reject form, the diff (unified or side-by-side, plus the raw patch),
-the event log, the artifacts, the logs, the prompts as sent, a submit form, and
-a read-only config page. Everything it serves is embedded in the binary — no
-CDN, no fonts, no analytics — so it renders on a machine with no network at all.
-Config *editing* is not offered anywhere: the file on disk stays the only way to
-change settings.
+The UI is mostly read-and-decide — the job list and job detail, the gate
+document with the approve/reject form, the diff (unified or side-by-side, plus
+the raw patch), the event log, the artifacts, the logs, the prompts as sent, a
+submit form — plus one place that writes: the config page, covered in §9.
+Everything else it serves is embedded in the binary — no CDN, no fonts, no
+analytics — so it renders on a machine with no network at all.
 
 The gate page is laid out as a review desk rather than a document with a form
 under it. The queue of everything waiting on a human is a rail down the left,
@@ -438,3 +437,67 @@ runs the same render `sdlc review` does, against the worktree as it stands. When
 that is impossible — the worktree was cleaned up, the target was renamed out of
 the config — it falls back to the snapshot written when the job parked, and says
 on the page which of the two you are reading.
+
+---
+
+## 9. Runtime config
+
+`sdlc run` and `sdlc serve` are both long-lived processes, and each watches
+`sdlc.yaml` on its own, independent timer — a couple of seconds, and not
+itself a config key: the interval that governs noticing a change is
+infrastructure for the config system, not a setting it exposes, so it will
+never appear as one. **Most of the file is live**: change
+`limits.max_fix_attempts`, a target's build command, an agent's model, a
+timeout — anything not named below — and the running engine and the running
+server both pick it up on their next poll tick, no restart. This is the
+practical meaning of "runtime configurable" here: nothing more happens than
+the file being re-read and re-validated; there is no separate "apply" step to
+remember.
+
+**Four settings still need a restart**, because each is already baked into a
+resource the process opened at startup, not read fresh at point of use:
+
+| Setting | Why a restart |
+|---|---|
+| `orchestrator.data_dir` | job directories any in-flight job already has open would not move |
+| `orchestrator.lock_file` | the process would keep holding a lock at a path it no longer reports |
+| `database.*` (path, busy_timeout) | the open database connection would not reopen against a new path or timeout |
+| `server.listen` | a bound listener cannot be rebound from inside the handler running on it |
+
+An edit that touches one of these is refused exactly like an invalid edit: the
+process logs what changed and why it needs a restart, and keeps running on the
+config it already had. Nothing about the pipeline mid-flight is disturbed by a
+refusal — see SPEC §12.1 for the full mechanism.
+
+**A rejected save never touches disk.** Whether the edit comes from `sdlc
+serve`'s config page or from hand-editing the file, the same check runs before
+anything is written: parse, validate, then diff against the four
+restart-required settings above. Only an edit that passes all of that gets
+written — through a temp-file-and-rename, so a reader never sees a half-written
+file — and only then does the running process swap over to it. A typo, a bad
+value, or an edit to a restart-required field leaves the file on disk exactly
+as it was; from the config page, it re-renders with the error and the text you
+submitted still in the box, so a rejected save does not cost you the edit.
+
+**Every accepted save is backed up first**, into a `.sdlc-config-history/`
+directory created next to `sdlc.yaml` (so, by default, at the repo root
+alongside it — see §1). Each save copies what was on disk into a
+timestamped file there before overwriting it, pruned to the newest 50. The
+config page's history view lists these and can load an old one back into the
+editor, but loading is not restoring: you still have to hit Save, same as
+every other destructive-adjacent action in this UI (`cancel` needs
+`confirm=yes`; nothing here is one click).
+
+**The editor shows exactly what is on disk — nothing is redacted.** The
+read-only config view elsewhere in the UI shows the *decoded, effective*
+config with anything credential-shaped replaced by `[redacted]`; the editor is
+different on purpose; it round-trips the raw file text, because env-var
+expansion (`${VAR}`) happens on that raw text before it is parsed, and writing
+back a redacted or decoded copy would silently discard whatever the operator
+had written. This makes the existing convention non-optional the moment the
+config is browser-editable: **secrets belong in environment variables,
+referenced as `${VAR}`, never written into `sdlc.yaml` as literal values** —
+anything typed into the raw editor is exactly what anyone who reaches the page
+gets to read back, with no redaction step in between. `sdlc.example.yaml`'s
+own header comment says the same thing; the editor is just one more surface
+where it is now load-bearing rather than a style preference.

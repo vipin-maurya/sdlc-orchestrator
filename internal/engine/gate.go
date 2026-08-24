@@ -57,7 +57,7 @@ func (e *Engine) announceGate(ctx context.Context, j *store.Job, gate string) {
 		// it is announced afresh rather than treated as a repeat of the old.
 		seen, n = false, gateNotice{}
 	}
-	interval := e.cfg.Orchestrator.GateReminderInterval.D()
+	interval := e.cfg.Get().Orchestrator.GateReminderInterval.D()
 	if seen && (interval == 0 || time.Since(n.last) < interval) {
 		return
 	}
@@ -82,7 +82,7 @@ func (e *Engine) announceGate(ctx context.Context, j *store.Job, gate string) {
 		// An unknown target must not swallow the announcement: the operator
 		// still needs to know the job is stopped, even if the config that
 		// would let us render the document has gone missing.
-		if t, err := e.cfg.Target(j.Target); err != nil {
+		if t, err := e.cfg.Get().Target(j.Target); err != nil {
 			e.logger.Printf("%s: gate document: %v", j.ID, err)
 		} else {
 			var evs []*store.Event
@@ -94,7 +94,7 @@ func (e *Engine) announceGate(ctx context.Context, j *store.Job, gate string) {
 			doc, path, err := review.Write(ctx, review.Options{
 				Job:           j,
 				Gate:          gate,
-				DataDir:       e.cfg.Orchestrator.DataDir,
+				DataDir:       e.cfg.Get().Orchestrator.DataDir,
 				RepoPath:      t.RepoPath,
 				DefaultBranch: t.DefaultBranch,
 				ShipCommand:   t.Ship.Command,
@@ -155,7 +155,7 @@ func (e *Engine) printGateNotice(j *store.Job, n gateNotice, reminder bool) {
 func (e *Engine) gateHeadline(ctx context.Context, j *store.Job, gate string, t config.Target) string {
 	switch gate {
 	case review.GateSpec:
-		p, err := artifact.LoadPlan(filepath.Join(artifact.ArtifactsDir(e.cfg.Orchestrator.DataDir, j.ID), "plan.json"))
+		p, err := artifact.LoadPlan(filepath.Join(artifact.ArtifactsDir(e.cfg.Get().Orchestrator.DataDir, j.ID), "plan.json"))
 		if err != nil {
 			return ""
 		}
