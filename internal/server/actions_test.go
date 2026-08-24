@@ -9,9 +9,11 @@ package server
 // 200 is one a browser reload posts a second time.
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 
@@ -627,5 +629,112 @@ func TestConcurrentDecisionIsAConflictNotAnError(t *testing.T) {
 	}
 	if rows := e.approvals(); len(rows) != 1 {
 		t.Errorf("%d approval rows, want 1", len(rows))
+	}
+}
+
+// --- config save -----------------------------------------------------------
+//
+// These three are the concurrency-shaped claims the plan asks for beyond the
+// handler-in-isolation cases in pages_test.go: that a save takes effect
+// without a second request, that a restart-only edit never reaches disk, and
+// that a refused save never costs the operator the text they typed.
+
+// TestConfigSaveIsVisibleImmediately is config.Live's whole point, exercised
+// through the HTTP handler rather than against Live directly (live_test.go in
+// internal/config already covers Live itself): one POST, no second request,
+// and s.cfg.Get() already reflects it by the time the POST returns.
+func TestConfigSaveIsVisibleImmediately(t *testing.T) {
+	e := newEnv(t)
+	if got := e.live.Get().Orchestrator.MaxParallelJobs; got != 2 {
+		t.Fatalf("starting max_parallel_jobs = %d, want the default of 2", got)
+	}
+	raw, err := os.ReadFile(e.cfg.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(raw), "orchestrator:\n", "orchestrator:\n  max_parallel_jobs: 9\n", 1)
+
+	res := e.post("/config", url.Values{"config": {edited}})
+	if res.StatusCode != http.StatusSeeOther {
+		t.Fatalf("status = %d, want 303: %s", res.StatusCode, e.body(res))
+	}
+	if got := res.Header.Get("Location"); got != "/config?saved=1" {
+		t.Errorf("Location = %q, want /config?saved=1", got)
+	}
+	// No second request: e.live is the exact *config.Live the handler that
+	// just answered was holding.
+	if got := e.live.Get().Orchestrator.MaxParallelJobs; got != 9 {
+		t.Errorf("Get() right after the POST returned = %d, want 9", got)
+	}
+	if got := e.srv.cfg.Get().Orchestrator.MaxParallelJobs; got != 9 {
+		t.Errorf("s.cfg.Get() right after the POST returned = %d, want 9", got)
+	}
+}
+
+// TestConfigSaveRefusesARestartOnlyEditAndLeavesTheFileUnchanged covers the
+// refusal Apply itself already proves (internal/config/live_test.go) from the
+// handler's side: the response is not a 303 (there is nothing to reload into
+// that would show the edit — it was never applied), it names the field, and
+// the file on disk is unchanged down to the byte.
+func TestConfigSaveRefusesARestartOnlyEditAndLeavesTheFileUnchanged(t *testing.T) {
+	e := newEnv(t)
+	before, err := os.ReadFile(e.cfg.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	edited := strings.Replace(string(before), "database:\n", "server:\n  listen: 127.0.0.1:9999\ndatabase:\n", 1)
+
+	res := e.post("/config", url.Values{"config": {edited}})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("a restart-only edit answered %d, want 200 (no redirect: it was never applied)", res.StatusCode)
+	}
+	body := e.body(res)
+	if !strings.Contains(body, "server.listen") {
+		t.Errorf("the refusal does not name server.listen:\n%s", pageMain(t, body))
+	}
+	after, err := os.ReadFile(e.cfg.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("the config file changed despite the edit needing a restart")
+	}
+	if got := e.live.Get().Server.Listen; got != "127.0.0.1:7777" {
+		t.Errorf("the live config changed despite the edit needing a restart: Server.Listen = %q", got)
+	}
+}
+
+// TestConfigSaveInvalidEditPreservesSubmittedTextAndLeavesTheFileUnchanged is
+// the "losing an edit to a typo would be actively hostile" property the plan
+// names directly: a save that fails to parse re-renders with exactly the text
+// that was submitted still in the box, not what is (unchanged) on disk.
+func TestConfigSaveInvalidEditPreservesSubmittedTextAndLeavesTheFileUnchanged(t *testing.T) {
+	e := newEnv(t)
+	before, err := os.ReadFile(e.cfg.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const submitted = "not: valid: yaml: at: all: :::"
+
+	res := e.post("/config", url.Values{"config": {submitted}})
+	if res.StatusCode != http.StatusOK {
+		t.Fatalf("an invalid edit answered %d, want 200", res.StatusCode)
+	}
+	body := e.body(res)
+	if !strings.Contains(body, submitted) {
+		t.Error("the refused save does not show the submitted text back to the operator")
+	}
+	if strings.Contains(body, "not saved") == false {
+		t.Error("the refusal does not say the edit was not saved")
+	}
+	after, err := os.ReadFile(e.cfg.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Error("the config file changed despite the edit being invalid")
+	}
+	if got := e.live.Get().Orchestrator.MaxParallelJobs; got != 2 {
+		t.Errorf("the live config changed despite the edit being invalid: max_parallel_jobs = %d", got)
 	}
 }

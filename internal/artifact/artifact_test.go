@@ -1,6 +1,7 @@
 package artifact
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -174,5 +175,146 @@ func TestReadJSONTolerance(t *testing.T) {
 	// the first byte, so this must fail rather than silently half-parse.
 	if _, err := LoadSpec(write(t, "spec.json", "Here you go:\n"+fenced)); err == nil {
 		t.Error("leading prose accepted; if that is now intended, update this test")
+	}
+}
+
+// validProblem is the baseline every case below mutates. Keeping one literal
+// means a new required field breaks every case at once rather than silently
+// leaving the older ones testing a shape that no longer validates.
+func validProblem() map[string]any {
+	return map[string]any{
+		"schema":            "problem/1",
+		"problem_statement": "SmsExpenseParser drops amounts written with a non-breaking space.",
+		"in_scope":          []string{"the SMS amount parser"},
+		"out_of_scope":      []string{"the notification parser"},
+		"success_criteria":  []string{"an SMS with U+00A0 before the amount parses to the same value as one with a plain space"},
+		"assumptions":       []any{},
+		"open_questions":    []any{},
+		"clarity":           "clear",
+	}
+}
+
+func writeProblem(t *testing.T, m map[string]any) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "problem.json")
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func TestLoadProblemAcceptsEachClarity(t *testing.T) {
+	cases := []struct {
+		clarity string
+		mutate  func(m map[string]any)
+	}{
+		{"clear", func(m map[string]any) {}},
+		{"assumed", func(m map[string]any) {
+			m["assumptions"] = []any{map[string]any{
+				"assumption": "only the SMS path is affected",
+				"basis":      "NotificationParser has its own amount regex, unchanged since 1.0.2",
+			}}
+		}},
+		{"blocked", func(m map[string]any) {
+			m["open_questions"] = []any{map[string]any{
+				"id": "Q1", "question": "Should the old format stay readable?",
+				"why_it_matters": "decides whether a migration is needed", "blocking": true,
+			}}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.clarity, func(t *testing.T) {
+			m := validProblem()
+			m["clarity"] = tc.clarity
+			tc.mutate(m)
+			got, err := LoadProblem(writeProblem(t, m))
+			if err != nil {
+				t.Fatalf("valid %s problem rejected: %v", tc.clarity, err)
+			}
+			if got.Clarity != tc.clarity {
+				t.Errorf("clarity=%q, want %q", got.Clarity, tc.clarity)
+			}
+		})
+	}
+}
+
+// The clarity field decides the route, so it is checked in both directions.
+// Forward: "blocked" with nothing to ask parks the job forever on a question
+// the operator cannot answer because it was never written down. Reverse: a
+// blocking question with clarity "clear" lets the agent route itself past the
+// human, which defeats the state.
+func TestLoadProblemRejectsInvalid(t *testing.T) {
+	blocking := []any{map[string]any{
+		"id": "Q1", "question": "which parser?", "why_it_matters": "different work", "blocking": true,
+	}}
+	cases := []struct {
+		name   string
+		mutate func(m map[string]any)
+		want   string
+	}{
+		{"wrong schema", func(m map[string]any) { m["schema"] = "problem/2" }, "problem/1"},
+		{"no statement", func(m map[string]any) { m["problem_statement"] = "" }, "problem_statement"},
+		{"no in_scope", func(m map[string]any) { m["in_scope"] = []string{} }, "in_scope"},
+		{"no out_of_scope", func(m map[string]any) { m["out_of_scope"] = []string{} }, "out_of_scope"},
+		{"no success criteria", func(m map[string]any) { m["success_criteria"] = []string{} }, "success_criteria"},
+		{"unknown clarity", func(m map[string]any) { m["clarity"] = "murky" }, "clarity"},
+		{"blocked with no blocking question", func(m map[string]any) { m["clarity"] = "blocked" }, "blocking"},
+		{"blocking question but clarity clear", func(m map[string]any) { m["open_questions"] = blocking }, "blocking"},
+		{"assumed with no assumptions", func(m map[string]any) { m["clarity"] = "assumed" }, "assumptions"},
+		{"question with no id", func(m map[string]any) {
+			m["clarity"] = "blocked"
+			m["open_questions"] = []any{map[string]any{"question": "which parser?", "blocking": true}}
+		}, "id"},
+		{"duplicate question ids", func(m map[string]any) {
+			m["clarity"] = "blocked"
+			m["open_questions"] = []any{
+				map[string]any{"id": "Q1", "question": "a", "blocking": true},
+				map[string]any{"id": "Q1", "question": "b", "blocking": false},
+			}
+		}, "Q1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := validProblem()
+			tc.mutate(m)
+			_, err := LoadProblem(writeProblem(t, m))
+			if err == nil {
+				t.Fatal("invalid problem accepted")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A non-blocking question is informational at any clarity: it reaches the gate
+// document and the planning prompt, and never routes.
+func TestLoadProblemAllowsNonBlockingQuestionWhenClear(t *testing.T) {
+	m := validProblem()
+	m["open_questions"] = []any{map[string]any{
+		"id": "Q1", "question": "is the notification path worth a follow-up?",
+		"why_it_matters": "possible second ticket", "blocking": false,
+	}}
+	if _, err := LoadProblem(writeProblem(t, m)); err != nil {
+		t.Fatalf("non-blocking question rejected at clarity clear: %v", err)
+	}
+}
+
+// Agents on Windows backends write BOMs routinely, and fenced JSON is a
+// standing failure mode; every other Load* strips both.
+func TestLoadProblemStripsBOMAndFences(t *testing.T) {
+	m := validProblem()
+	b, _ := json.Marshal(m)
+	p := filepath.Join(t.TempDir(), "problem.json")
+	if err := os.WriteFile(p, []byte("\ufeff```json\n"+string(b)+"\n```"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadProblem(p); err != nil {
+		t.Fatalf("BOM/fence-wrapped problem rejected: %v", err)
 	}
 }

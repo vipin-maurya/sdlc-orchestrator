@@ -203,7 +203,7 @@ func (s *Server) handleGate(w http.ResponseWriter, r *http.Request) {
 		Title:      doc.Title,
 		Waiting:    true,
 		Source:     src,
-		SourcePath: review.DocPath(s.cfg.Orchestrator.DataDir, j.ID, gate),
+		SourcePath: review.DocPath(s.cfg.Get().Orchestrator.DataDir, j.ID, gate),
 		Blocks:     blockViews(doc.Blocks),
 		HasDiff:    doc.Diff != "",
 		Pipeline:   pipelineFor(j.State, j.PrevState),
@@ -253,7 +253,7 @@ func (s *Server) gateDoc(ctx context.Context, j *store.Job, gate string) (*revie
 // liveDoc is the same call `sdlc review` makes, with the same arguments, so the
 // browser and the terminal cannot describe one gate differently.
 func (s *Server) liveDoc(ctx context.Context, j *store.Job, gate string) (*review.Doc, error) {
-	t, err := s.cfg.Target(j.Target)
+	t, err := s.cfg.Get().Target(j.Target)
 	if err != nil {
 		return nil, err
 	}
@@ -271,7 +271,7 @@ func (s *Server) liveDoc(ctx context.Context, j *store.Job, gate string) (*revie
 	return review.Render(rctx, review.Options{
 		Job:           j,
 		Gate:          gate,
-		DataDir:       s.cfg.Orchestrator.DataDir,
+		DataDir:       s.cfg.Get().Orchestrator.DataDir,
 		RepoPath:      t.RepoPath,
 		DefaultBranch: t.DefaultBranch,
 		ShipCommand:   t.Ship.Command,
@@ -293,7 +293,7 @@ const diffTruncationSentinel = "[sdlc] This patch stops here:"
 // banner that appears because a patch happens to be large is a banner nobody
 // believes the third time.
 func (s *Server) persistedDoc(j *store.Job, gate string) (*review.Doc, error) {
-	dataDir := s.cfg.Orchestrator.DataDir
+	dataDir := s.cfg.Get().Orchestrator.DataDir
 	body, err := os.ReadFile(review.DocPath(dataDir, j.ID, gate))
 	if err != nil {
 		return nil, err

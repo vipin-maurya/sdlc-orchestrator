@@ -105,20 +105,21 @@ live in autoship's encrypted store and are never readable by agents.
 
 Pipeline states (in nominal order):
 
-`CREATED → PLANNING → DESIGN_REVIEW → IMPLEMENTING → CODE_REVIEW → BUILDING →
-TESTING → FINAL_REVIEW → AWAITING_MERGE_APPROVAL → MERGING →
+`CREATED → SCOPING → PLANNING → DESIGN_REVIEW → IMPLEMENTING → CODE_REVIEW →
+BUILDING → TESTING → FINAL_REVIEW → AWAITING_MERGE_APPROVAL → MERGING →
 AWAITING_RELEASE_APPROVAL → RELEASING → COMPLETED`
 
 Off-nominal states: `FLAKE_CHECK`, `ANALYZING`, `FIXING`,
 `BLOCKED_ON_QUOTA`, `ESCALATED`, `CANCELLED`, `TIMED_OUT`, `FAILED`.
 
-Optional gate states: `AWAITING_SPEC_APPROVAL` (between DESIGN_REVIEW and
-IMPLEMENTING) and `AWAITING_CODE_APPROVAL` (between CODE_REVIEW and
-BUILDING). They exist only when `policies.human_gates` lists `spec` /
-`code`; at that key's empty default the pipeline never enters them. A job
-parked in one of them on a binary that no longer knows the state is
-escalated with `no handler for state ...` — a hold with a reason, not a
-crash.
+Gate states: `AWAITING_SCOPE_APPROVAL` (between SCOPING and PLANNING, entered
+when the agent asks a blocking question or `policies.human_gates` lists `scope`),
+`AWAITING_SPEC_APPROVAL` (between DESIGN_REVIEW and IMPLEMENTING), and
+`AWAITING_CODE_APPROVAL` (between CODE_REVIEW and BUILDING). `spec` and `code`
+exist only when `policies.human_gates` lists them; at that key's empty default
+the pipeline never enters them. A job parked in one of them on a binary that no
+longer knows the state is escalated with `no handler for state ...` — a hold
+with a reason, not a crash.
 
 Terminal states: `COMPLETED`, `CANCELLED`, `FAILED`.
 `ESCALATED` and `TIMED_OUT` are durable holds: a human can `sdlc resume`
@@ -128,7 +129,12 @@ Terminal states: `COMPLETED`, `CANCELLED`, `FAILED`.
 
 | From | Trigger | To |
 |---|---|---|
-| CREATED | scheduler picks up job, worktree provisioned | PLANNING |
+| CREATED | scheduler picks up job, worktree provisioned | SCOPING (or PLANNING when `policies.scoping: off`) |
+| SCOPING | problem.json valid, clarity clear/assumed | PLANNING |
+| SCOPING | problem.json valid, clarity blocked OR `policies.human_gates` lists `scope` | AWAITING_SCOPE_APPROVAL |
+| SCOPING | rounds >= `limits.max_scope_rounds` or agent retries exhausted | ESCALATED |
+| AWAITING_SCOPE_APPROVAL | `sdlc approve` | PLANNING (open questions waived) |
+| AWAITING_SCOPE_APPROVAL | `sdlc reject` | SCOPING (answers attached) or CANCELLED (`--cancel`) |
 | PLANNING | spec.json + plan.json valid | DESIGN_REVIEW |
 | PLANNING | agent failure > `limits.max_agent_retries` | ESCALATED |
 | DESIGN_REVIEW | no finding at or above `policies.design_review_blocks_at`; any lesser findings forwarded to IMPLEMENTING | IMPLEMENTING |
@@ -208,7 +214,7 @@ Notes (normative):
 ### 3.3 Per-state counters
 
 Independent counters per job, persisted (not one shared `retry_count`):
-`design_review_rounds`, `code_review_rounds`, `fix_attempts`,
+`scope_rounds`, `design_review_rounds`, `code_review_rounds`, `fix_attempts`,
 `flake_retries`, `release_retries`, and per-state `agent_retries`
 (reset on state change). Budgets are configured under `limits.*`.
 
@@ -350,6 +356,17 @@ All artifacts share an envelope: `{"schema": "<name>/1", ...}`. Validation is
 structural (required fields, enum values) in Go — no external JSON-schema lib
 needed, but each schema has one validator function + tests.
 
+**problem/1** (`problem.json`)
+```json
+{ "schema": "problem/1", "problem_statement": "...",
+  "in_scope": ["..."], "out_of_scope": ["..."],
+  "success_criteria": ["..."],
+  "assumptions": [ { "assumption": "...", "basis": "..." } ],
+  "open_questions": [ { "id": "Q1", "question": "...", "why_it_matters": "...", "blocking": true } ],
+  "clarity": "clear|assumed|blocked" }
+```
+Required: every key; `problem_statement`, `in_scope`, `out_of_scope`, `success_criteria` non-empty. `clarity` must agree with `assumptions` and `open_questions`.
+
 **spec/1** (`spec.json`)
 ```json
 { "schema": "spec/1", "issue_summary": "...", "approach": "...",
@@ -481,6 +498,7 @@ state handler checks post-conditions itself:
 
 | State | Post-condition |
 |---|---|
+| SCOPING | `problem.json` exists and validates (`problem/1`); worktree diff empty (any changes discarded) |
 | PLANNING | `spec.json` + `plan.json` exist and validate |
 | DESIGN_/CODE_/FINAL_REVIEW | round's `review.json` validates; **worktree diff must be empty** (reviewer wrote files ⇒ hard failure). Gating findings then go through the verify pass (§5.2) before the gate is evaluated |
 | VERIFYING (per verifier) | `.sdlc/verdicts/<finding>.v<n>.json` validates as `verdict/1`. No retry: the other votes are the redundancy, and retrying would inflate the fan-out silently |
@@ -619,6 +637,10 @@ Prompt content rules (normative):
   claim about third-party library behaviour is not verified until the resolved
   artifact has been inspected, never from memory. It must also say that an
   unverifiable claim defaults to `refuted`.
+- The SCOPING template must instruct: *ground the problem in the repository,
+  distinguish in-scope from out-of-scope, define measurable success criteria,
+  make reasonable assumptions where possible, and raise blocking open questions
+  only when truly unable to proceed without operator decision.*
 - The PLANNING template must require the plan to account for its own blast
   radius: for every production symbol it modifies, the existing tests that
   assert the current behaviour are named in the step that changes it, with
@@ -817,6 +839,7 @@ database:
 
 limits:
   max_job_duration: 12h         # wall clock from submit; then TIMED_OUT
+  max_scope_rounds: 2           # scoping iteration cap; then ESCALATED
   max_design_review_rounds: 2
   max_code_review_rounds: 3
   max_fix_attempts: 3           # shared across CODE_REVIEW/ANALYZING/FINAL_REVIEW-driven fixes
@@ -875,6 +898,11 @@ agents:
   # add more freely; `backend` must be a key under backends
 
 states:                          # every agent state must appear here
+  SCOPING:
+    agent: opus
+    prompt: ""                   # empty ⇒ embedded default prompts/scoping.md
+    timeout: 15m
+    disallowed_tools: [Edit, NotebookEdit]
   PLANNING:
     agent: opus
     prompt: ""                   # empty ⇒ embedded default prompts/planning.md
@@ -919,11 +947,12 @@ states:                          # every agent state must appear here
     disallowed_tools: [Edit, NotebookEdit]   # Bash kept: verifiers read jars
 
 policies:
+  scoping: "on"                         # on | off (reproduces pre-feature CREATED -> PLANNING)
   protected_branches: [main, master]
   design_review_blocks_at: major        # blocker | major | minor | nit — lowest severity
   code_review_blocks_at: blocker        # that stops the pipeline at each review gate.
   final_review_blocks_at: blocker       # Default blocker; lesser findings are forwarded, not dropped.
-  human_gates: []                       # optional earlier stops: spec | code;
+  human_gates: []                       # optional earlier stops: scope | spec | code;
                                         # merge and release always enforced
   protect_tests_on_code_bug_fix: true   # FIXING diff may not touch test files when classification=code_bug
   test_file_globs:
@@ -985,6 +1014,40 @@ Decoding is strict, so `server:` is a key that older binaries — those built
 before `sdlc serve` existed — reject outright rather than ignore. That is why
 `sdlc.example.yaml` ships the block commented out: uncomment it only to change
 the default.
+
+### 12.1 Live reload
+
+`sdlc run` and `sdlc serve` are each long-lived processes, and each
+independently watches `sdlc.yaml` for changes and reloads it while running —
+polling the file's mtime and size on its own timer, re-parsing and
+re-validating only when one has moved. The two processes never talk to each
+other directly; a config edit becomes live in both only because both are
+watching the same file. An edit that fails to parse or fails validation is
+refused: the process keeps running on the config it already had, unaffected.
+
+Four settings are the exception and still require a restart, because each is
+already baked into a resource the process opened before the edit arrived,
+not something re-read at point of use:
+
+- `orchestrator.data_dir` — job directories any in-flight job already has
+  open would not move.
+- `orchestrator.lock_file` — the process would be left holding a lock at a
+  path it no longer reports.
+- the `database` block (`database.path`, `database.busy_timeout`) — the open
+  `sql.Open` connection would not reopen against a new path or timeout.
+- `server.listen` — a bound listener cannot be rebound from inside the
+  handler running on it.
+
+An edit touching any of those is refused exactly like an invalid one: the
+process reports what needs a restart and keeps running on the previous
+values. Every other key is read fresh at its point of use throughout the
+codebase, so a change to it is live the moment the edit is accepted — no
+entry in the list above, no restart.
+
+`sdlc serve`'s `/config` page can write to the file directly, in addition to
+reading it: a save goes through the same validate-then-swap path a watched
+file edit does, so a save that would require a restart, or that fails to
+validate, is refused before it reaches disk.
 
 ---
 

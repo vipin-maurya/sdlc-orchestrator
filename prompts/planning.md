@@ -8,6 +8,26 @@ Title: {{.IssueTitle}}
 
 {{.IssueBody}}
 
+{{if .ScopedProblem}}# Scoped problem
+
+A scoping pass investigated this issue and produced `.sdlc/context/problem.json` (also inlined
+below). This statement is the authoritative scope of this job: its `in_scope` and `out_of_scope`
+are boundaries you must respect, its `success_criteria` must be covered by your acceptance
+criteria, and its `assumptions` are ground truth you build on.
+
+```json
+{{.ScopedProblem}}
+```
+
+Two rules bind you to it:
+- Your spec's `out_of_scope` must include every entry of the problem's `out_of_scope`.
+- Do not widen `in_scope`. If work outside it is genuinely necessary, say so explicitly in
+  `approach` and name it — do not fold it in silently.
+
+Where the problem records an assumption, treat it as settled. Where it records a non-blocking
+open question, treat it as a known unknown: do not design around an answer nobody gave.
+{{end}}
+
 {{if .PrevFindings}}# Previous review findings (this is round {{.Round}} — your last spec/plan was rejected)
 
 A reviewer rejected the previous version. You MUST address every blocker below. The previous

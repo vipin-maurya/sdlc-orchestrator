@@ -36,7 +36,7 @@ import (
 // rev is mutated: surviving findings keep their severity, refuted ones are
 // downgraded and annotated. Callers must gate on rev *after* this returns.
 func (c *jobCtx) verifyFindings(ctx context.Context, rev *artifact.Review, reviewName, threshold string) (string, error) {
-	votes := c.e.cfg.Limits.VerifyVotes
+	votes := c.e.cfg.Get().Limits.VerifyVotes
 	if votes <= 0 {
 		return "", nil
 	}
@@ -51,7 +51,7 @@ func (c *jobCtx) verifyFindings(ctx context.Context, rev *artifact.Review, revie
 		// nothing to argue about and no agent invoked.
 		return "", nil
 	}
-	minConfirm := c.e.cfg.Limits.VerifyMinConfirm
+	minConfirm := c.e.cfg.Get().Limits.VerifyMinConfirm
 	if minConfirm < 1 {
 		minConfirm = 1
 	}
@@ -148,7 +148,7 @@ func findingIDs(fs []artifact.Finding) []string {
 // vote: three agents that can read each other's verdicts produce one verdict
 // with extra steps.
 func (c *jobCtx) runVerifiers(ctx context.Context, f artifact.Finding, n int) ([]artifact.Verdict, error) {
-	agentName, ag, backend, stCfg, err := c.e.cfg.AgentFor(SVerifying)
+	agentName, ag, backend, stCfg, err := c.e.cfg.Get().AgentFor(SVerifying)
 	if err != nil {
 		return nil, fmt.Errorf("verify pass: %w", err)
 	}
@@ -171,7 +171,7 @@ func (c *jobCtx) runVerifiers(ctx context.Context, f artifact.Finding, n int) ([
 	if err := os.MkdirAll(verdictDir, 0o755); err != nil {
 		return nil, err
 	}
-	cfgDir := filepath.Dir(c.e.cfg.Path)
+	cfgDir := filepath.Dir(c.e.cfg.Get().Path)
 	fid := safeID(f.ID)
 
 	type slot struct {
@@ -302,7 +302,7 @@ func (c *jobCtx) runVerifiers(ctx context.Context, f artifact.Finding, n int) ([
 func (c *jobCtx) reserveInvocations(n int) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.job.Counters.AgentInvocations+n > c.e.cfg.Limits.MaxAgentInvocationsPerJob {
+	if c.job.Counters.AgentInvocations+n > c.e.cfg.Get().Limits.MaxAgentInvocationsPerJob {
 		return false
 	}
 	c.job.Counters.AgentInvocations += n

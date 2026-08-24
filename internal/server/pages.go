@@ -253,7 +253,7 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	dir := s.cfg.Orchestrator.DataDir
+	dir := s.cfg.Get().Orchestrator.DataDir
 	body := jobPage{
 		Job:          j,
 		Gate:         review.GateFor(j.State),
@@ -418,10 +418,10 @@ func (s *Server) serveListing(w http.ResponseWriter, r *http.Request, kind strin
 	if !ok {
 		return
 	}
-	dir := artifact.LogsDir(s.cfg.Orchestrator.DataDir, j.ID)
+	dir := artifact.LogsDir(s.cfg.Get().Orchestrator.DataDir, j.ID)
 	title := j.ID + " logs"
 	if kind == "artifacts" {
-		dir = artifact.ArtifactsDir(s.cfg.Orchestrator.DataDir, j.ID)
+		dir = artifact.ArtifactsDir(s.cfg.Get().Orchestrator.DataDir, j.ID)
 		title = j.ID + " artifacts"
 	}
 	body := listPage{Job: j, Dir: dir, Kind: kind}
@@ -477,7 +477,7 @@ func (s *Server) resolveNamed(w http.ResponseWriter, r *http.Request, dirFor fun
 		return nil, "", "", false
 	}
 	name := r.PathValue("name")
-	p, err := safeName(dirFor(s.cfg.Orchestrator.DataDir, j.ID), name)
+	p, err := safeName(dirFor(s.cfg.Get().Orchestrator.DataDir, j.ID), name)
 	if err != nil {
 		if errors.Is(err, errUnsafeName) {
 			s.fail(w, r, http.StatusBadRequest, "that is not a name this server will serve")
@@ -847,13 +847,13 @@ func (s *Server) handleSubmitForm(w http.ResponseWriter, r *http.Request) {
 		"The job parks at the first armed gate and appears in Waiting on you.",
 		"Nothing is pushed or shipped until you approve the merge and release gates.",
 	}}
-	names := make([]string, 0, len(s.cfg.Targets))
-	for name := range s.cfg.Targets {
+	names := make([]string, 0, len(s.cfg.Get().Targets))
+	for name := range s.cfg.Get().Targets {
 		names = append(names, name)
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		t := s.cfg.Targets[name]
+		t := s.cfg.Get().Targets[name]
 		body.Targets = append(body.Targets, submitTarget{Name: name, Repo: t.RepoPath, Branch: t.DefaultBranch})
 	}
 	body.Gates = s.gateOpts()
@@ -866,7 +866,7 @@ func (s *Server) handleSubmitForm(w http.ResponseWriter, r *http.Request) {
 // that are always armed are listed first and marked, because the order a
 // reader scans them in is the order the pipeline reaches them.
 func (s *Server) gateOpts() []gateOpt {
-	p := s.cfg.Policies
+	p := s.cfg.Get().Policies
 	return []gateOpt{
 		{Name: "spec", Detail: "After design review, before any code is written.", On: p.HumanGate("spec")},
 		{Name: "code", Detail: "After code review, before build and test.", On: p.HumanGate("code")},
@@ -883,9 +883,9 @@ func (s *Server) roleRows() []roleRow {
 	out := make([]roleRow, 0, len(config.AgentStates))
 	for _, st := range config.AgentStates {
 		row := roleRow{Role: strings.ToLower(st)}
-		if cs, ok := s.cfg.States[st]; ok {
+		if cs, ok := s.cfg.Get().States[st]; ok {
 			row.Agent = cs.Agent
-			if a, ok := s.cfg.Agents[cs.Agent]; ok {
+			if a, ok := s.cfg.Get().Agents[cs.Agent]; ok {
 				row.Backend, row.Model = a.Backend, a.Model
 			}
 		}
@@ -898,7 +898,7 @@ func (s *Server) roleRows() []roleRow {
 // engine enforces on its own; naming what happens when it is reached is the
 // half of a budget that tells an operator whether to raise it.
 func (s *Server) budgetRows() []kvRow {
-	l := s.cfg.Limits
+	l := s.cfg.Get().Limits
 	return []kvRow{
 		{K: "agent invocations", V: strconv.Itoa(l.MaxAgentInvocationsPerJob), Note: "per job"},
 		{K: "fix attempts", V: strconv.Itoa(l.MaxFixAttempts), Note: "then the job fails"},
@@ -927,6 +927,32 @@ type configPage struct {
 	// record; this is the index into it, and every value here is read off the
 	// same *config.Config, never restated.
 	Sections []configSection
+
+	// --- the edit surface. Everything below is about RawText, never Sections
+	// or YAML above: those two stay the decoded, redacted, read-only view they
+	// always were. RawText is the raw bytes of the file at Path — no
+	// expansion, no defaults filled in, nothing redacted — because ${VAR}
+	// expansion happens on that raw text before it is ever parsed
+	// (config.expandEnv, run inside config.Parse), so the file on disk is
+	// meant to hold "${GITHUB_TOKEN}", never a literal secret. A box that
+	// shows exactly what's on disk therefore never needs to redact anything
+	// it round-trips — see config.html for the sentence that tells the
+	// operator so.
+
+	// RawText is what the editor's textarea shows: the file at Path on a
+	// plain GET, the version named by a resolved ?load= on this GET, or — on
+	// a refused save — the exact text just submitted, never what is still on
+	// disk. Losing an edit to a typo would be actively hostile.
+	RawText string
+	// LoadedFrom names the history entry RawText came from ("" for the file
+	// on disk or a just-submitted edit), so the page can say a load has not
+	// been saved yet.
+	LoadedFrom string
+	// Saved is set once, right after a successful save's redirect (?saved=1).
+	Saved bool
+	// SaveErr is set only on a refused save: the parse/validate error, or a
+	// sentence naming the fields that need a restart. "" on every other GET.
+	SaveErr string
 }
 
 type configSection struct {
@@ -936,23 +962,67 @@ type configSection struct {
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	body := configPage{
-		Path:     s.cfg.Path,
-		DataDir:  absOrAsIs(s.cfg.Orchestrator.DataDir),
-		DBPath:   absOrAsIs(s.cfg.Database.Path),
-		LockFile: absOrAsIs(s.cfg.Orchestrator.LockFile),
-		Listen:   s.cfg.Server.Listen,
-		JobsDir:  absOrAsIs(filepath.Join(s.cfg.Orchestrator.DataDir, "jobs")),
-	}
-	text, redacted, err := redactedConfigYAML(s.cfg)
+	body, err := s.buildConfigPage()
 	if err != nil {
 		s.log.Printf("re-marshalling config: %v", err)
 		s.fail(w, r, http.StatusInternalServerError, "the loaded config could not be re-marshalled to YAML")
 		return
 	}
+	if name := r.URL.Query().Get("load"); name != "" && body.Path != "" {
+		p, err := safeName(configHistoryDir(body.Path), name)
+		if err != nil {
+			if errors.Is(err, errUnsafeName) {
+				s.fail(w, r, http.StatusBadRequest, "that is not a name this server will serve")
+				return
+			}
+			s.fail(w, r, http.StatusNotFound, fmt.Sprintf("no history entry named %q", name))
+			return
+		}
+		raw, err := os.ReadFile(p)
+		if err != nil {
+			s.log.Printf("reading config history %s: %v", p, err)
+			s.fail(w, r, http.StatusInternalServerError, "that version could not be read")
+			return
+		}
+		body.RawText, body.LoadedFrom = string(raw), name
+	}
+	body.Saved = r.URL.Query().Get("saved") == "1"
+	s.render(w, r, "config.html", s.page(r, "Config", "config", body))
+}
+
+// buildConfigPage assembles everything about the loaded config that does not
+// depend on which request is asking for it — the decoded/redacted sections
+// and, when a file backs this process at all, the raw bytes at Path. Both
+// handleConfig and handleConfigSave's refusal path start from this and then
+// set the request-specific fields (RawText on refusal is the text that was
+// submitted, not what this function read from disk).
+func (s *Server) buildConfigPage() (configPage, error) {
+	cfg := s.cfg.Get()
+	body := configPage{
+		Path:     cfg.Path,
+		DataDir:  absOrAsIs(cfg.Orchestrator.DataDir),
+		DBPath:   absOrAsIs(cfg.Database.Path),
+		LockFile: absOrAsIs(cfg.Orchestrator.LockFile),
+		Listen:   cfg.Server.Listen,
+		JobsDir:  absOrAsIs(filepath.Join(cfg.Orchestrator.DataDir, "jobs")),
+	}
+	text, redacted, err := redactedConfigYAML(cfg)
+	if err != nil {
+		return configPage{}, err
+	}
 	body.YAML, body.Redacted = text, redacted
 	body.Sections = s.configSections()
-	s.render(w, r, "config.html", s.page(r, "Config", "config", body))
+	if cfg.Path != "" {
+		// A file that fails to read (removed out from under the process, a
+		// permissions change) leaves RawText empty rather than failing the
+		// whole page: every other section here is still true and worth
+		// showing, and an empty editor is the honest reflection of "this
+		// could not be read" — Save against it will simply fail the same way.
+		if raw, err := os.ReadFile(cfg.Path); err == nil {
+			body.RawText = string(raw)
+		}
+	}
+	return body, nil
 }
 
 // configSections shapes the loaded config into the four questions this page
@@ -960,7 +1030,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 // summary that derived something would be a second opinion about a config the
 // loader has already validated.
 func (s *Server) configSections() []configSection {
-	c := s.cfg
+	c := s.cfg.Get()
 	backends := make([]string, 0, len(c.Backends))
 	for name := range c.Backends {
 		backends = append(backends, name)
@@ -1021,6 +1091,113 @@ func (s *Server) configSections() []configSection {
 			{K: "serve address", V: c.Server.Listen, Note: "loopback only"},
 		}},
 	}
+}
+
+// --- /config/history -------------------------------------------------------
+
+// configHistoryDirName must match the literal writeWithBackup uses in
+// internal/config/live.go exactly — it is not exported (Owner B does not
+// touch internal/config), so it is duplicated here rather than imported.
+const configHistoryDirName = ".sdlc-config-history"
+
+// configHistoryDir is the directory Live's write path backs a replaced config
+// file up into, next to the file itself.
+func configHistoryDir(configPath string) string {
+	return filepath.Join(filepath.Dir(configPath), configHistoryDirName)
+}
+
+type configHistoryPage struct {
+	Dir   string
+	Files []fileRow
+	// Missing covers two cases the page does not need to tell apart: no
+	// config file is loaded at all (Dir is ""), or one is loaded but nothing
+	// has ever been saved through it, so the backup directory does not exist
+	// yet. Both read the same to an operator: there is no history to show.
+	Missing bool
+}
+
+func (s *Server) handleConfigHistory(w http.ResponseWriter, r *http.Request) {
+	path := s.cfg.Get().Path
+	body := configHistoryPage{}
+	if path == "" {
+		body.Missing = true
+		s.render(w, r, "config_history.html", s.page(r, "Config history", "config", body))
+		return
+	}
+	body.Dir = configHistoryDir(path)
+	ents, err := os.ReadDir(body.Dir)
+	if err != nil {
+		// No saves yet is the overwhelmingly likely reason this directory
+		// does not exist; a real read error (permissions) would fail Apply's
+		// own writes too, and that failure is reported there, not guessed at
+		// here.
+		body.Missing = true
+		s.render(w, r, "config_history.html", s.page(r, "Config history", "config", body))
+		return
+	}
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		body.Files = append(body.Files, fileRow{
+			Name:    e.Name(),
+			Href:    "/config/history/" + url.PathEscape(e.Name()),
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+		})
+	}
+	// Newest first: the filenames are a UTC timestamp prefix (writeWithBackup,
+	// internal/config/live.go), so lexical order is chronological order, and
+	// the version an operator opens this page to look at is almost always the
+	// one just before whatever is on disk now.
+	sort.SliceStable(body.Files, func(a, b int) bool {
+		return body.Files[a].Name > body.Files[b].Name
+	})
+	s.render(w, r, "config_history.html", s.page(r, "Config history", "config", body))
+}
+
+type configHistoryEntryPage struct {
+	Name string
+	Path string
+	Text string
+	// LoadHref is built here rather than in the template, matching every
+	// other href in this package (fileRow.Href, logPage.FollowURL): a Go
+	// value never gets interpolated into the middle of a URL string inside a
+	// template, it is escaped into a complete href first.
+	LoadHref string
+}
+
+func (s *Server) handleConfigHistoryEntry(w http.ResponseWriter, r *http.Request) {
+	cfgPath := s.cfg.Get().Path
+	name := r.PathValue("name")
+	if cfgPath == "" {
+		s.fail(w, r, http.StatusNotFound, fmt.Sprintf("no history entry named %q", name))
+		return
+	}
+	p, err := safeName(configHistoryDir(cfgPath), name)
+	if err != nil {
+		if errors.Is(err, errUnsafeName) {
+			s.fail(w, r, http.StatusBadRequest, "that is not a name this server will serve")
+			return
+		}
+		s.fail(w, r, http.StatusNotFound, fmt.Sprintf("no history entry named %q", name))
+		return
+	}
+	raw, err := os.ReadFile(p)
+	if err != nil {
+		s.log.Printf("reading config history %s: %v", p, err)
+		s.fail(w, r, http.StatusInternalServerError, "that version could not be read")
+		return
+	}
+	body := configHistoryEntryPage{
+		Name: name, Path: p, Text: string(raw),
+		LoadHref: "/config?load=" + url.QueryEscape(name),
+	}
+	s.render(w, r, "config_history_entry.html", s.page(r, "Config history: "+name, "config", body))
 }
 
 // absOrAsIs makes a relative path readable without hiding it. The default data

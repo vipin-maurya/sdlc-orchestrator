@@ -9,6 +9,7 @@ Title: {{.IssueTitle}}
 
 # Inputs
 
+- Scoped problem: `.sdlc/context/problem.json` (when scoping is enabled)
 - Specification: `.sdlc/context/spec.json`
 - Plan: `.sdlc/context/plan.json`
 
@@ -24,6 +25,10 @@ the approach fits the actual code), but you MUST NOT modify anything.
 5. Is the out-of-scope list explicit enough to prevent scope creep?
 6. Do the plan steps cover every acceptance criterion, in a workable order?
 7. Is anything in the plan risky or underspecified for an implementer with no shared context?
+8. If a scoped problem is present: does the spec actually solve *that* problem? Raise a finding
+   when the spec silently widens scope beyond `in_scope`, drops a `success_criteria` entry, or
+   solves something adjacent to what was scoped. Severity as calibrated below — a spec that
+   solves the wrong problem is a `blocker`.
 
 # Severity calibration
 

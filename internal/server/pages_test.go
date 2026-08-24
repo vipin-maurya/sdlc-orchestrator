@@ -14,6 +14,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -491,16 +492,29 @@ func TestAgentTextIsEscaped(t *testing.T) {
 
 // --- /config -------------------------------------------------------------
 
-func TestConfigPageIsReadOnly(t *testing.T) {
+// TestConfigDecodedViewCarriesNoForm covers the half of the config page that
+// is still, and stays, read-only: the decoded/redacted sections and the
+// "Loaded config as YAML" block above the raw-file editor. That editor is a
+// different view of a different thing (the raw file, see config.html's own
+// comment), so this is scoped to the slice of <main> between the page's own
+// heading and the editor's, rather than to the whole page — which now
+// legitimately does carry a form, for the editor.
+func TestConfigDecodedViewCarriesNoForm(t *testing.T) {
 	e := newEnv(t)
 	body := getOK(t, e, "/config")
-	// Scoped to <main>, which is the page. The shared chrome above it carries
-	// a button of its own — the command-palette opener, which is on every page
-	// and edits nothing — and a rule that could not tell the two apart would
-	// be a rule about base.html rather than about this page.
+	main := pageMain(t, body)
+	i := strings.Index(main, "Loaded config as YAML")
+	if i < 0 {
+		t.Fatal(`the config page does not render "Loaded config as YAML"`)
+	}
+	k := strings.Index(main, "Edit the config file")
+	if k < 0 || k < i {
+		t.Fatal(`the config page does not render "Edit the config file" after the YAML block`)
+	}
+	decoded := main[:k]
 	for _, bad := range []string{"<form", "<input", "<textarea", "<button"} {
-		if strings.Contains(strings.ToLower(pageMain(t, body)), bad) {
-			t.Errorf("the config page carries a %s; spec §2.2 refuses config editing in the UI", bad)
+		if strings.Contains(strings.ToLower(decoded), bad) {
+			t.Errorf("the decoded config view carries a %s; it must stay read-only", bad)
 		}
 	}
 	// It has to show the config, or "read-only" would be satisfied by a blank
@@ -509,6 +523,34 @@ func TestConfigPageIsReadOnly(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("the config page does not show %q", want)
 		}
+	}
+}
+
+// TestConfigEditorShowsRawFileBytes is the write path's read half: the
+// textarea holds exactly what config.Load read off disk, not the decoded,
+// redacted struct above it — see config.html's comment for why that is safe.
+func TestConfigEditorShowsRawFileBytes(t *testing.T) {
+	e := newEnv(t)
+	raw, err := os.ReadFile(e.cfg.Path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := getOK(t, e, "/config")
+	main := pageMain(t, body)
+	if !strings.Contains(main, `<form method="post" action="/config">`) {
+		t.Error("the config page has no POST form to /config")
+	}
+	if !strings.Contains(main, `name="csrf"`) {
+		t.Error("the config editor form carries no csrf field")
+	}
+	if !strings.Contains(main, `name="config"`) {
+		t.Error("the config editor form carries no config field")
+	}
+	// html.EscapeString rather than the raw bytes themselves: the fixture's
+	// config quotes its command arrays, and html/template escapes a quote
+	// inside a textarea same as anywhere else in text content.
+	if !strings.Contains(body, html.EscapeString(string(raw))) {
+		t.Error("the editor textarea does not hold the raw file's exact bytes")
 	}
 }
 

@@ -10,4 +10,8 @@
 # (repo checkouts, agent binaries) in it. The example is the versioned one.
 /sdlc.yaml
 
+# Pre-save backups of sdlc.yaml, written next to it by config.Live.Apply —
+# same machine-specific-and-never-versioned reasoning as /sdlc.yaml itself.
+/.sdlc-config-history
+
 .idea

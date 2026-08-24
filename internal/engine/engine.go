@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vipinm/sdlc-orchestrator/internal/agent"
+	"github.com/vipinm/sdlc-orchestrator/internal/artifact"
 	"github.com/vipinm/sdlc-orchestrator/internal/config"
 	"github.com/vipinm/sdlc-orchestrator/internal/gitx"
 	"github.com/vipinm/sdlc-orchestrator/internal/resource"
@@ -22,7 +23,7 @@ import (
 )
 
 type Engine struct {
-	cfg    *config.Config
+	cfg    *config.Live
 	st     *store.Store
 	runner *agent.Runner
 	res    *resource.Manager
@@ -32,26 +33,28 @@ type Engine struct {
 	inFlight   map[string]bool
 	reconciled map[string]bool
 	announced  map[string]gateNotice
-	sem        chan struct{}
+	sem        *resizableSem
 	wg         sync.WaitGroup
 
 	lockFile *os.File
 }
 
-func New(cfg *config.Config, st *store.Store, logger *log.Logger) *Engine {
+func New(cfg *config.Live, st *store.Store, logger *log.Logger) *Engine {
 	if logger == nil {
 		logger = log.New(os.Stdout, "", log.LstdFlags)
 	}
+	sem := &resizableSem{}
+	sem.SetCapacity(cfg.Get().Orchestrator.MaxParallelJobs)
 	return &Engine{
 		cfg:        cfg,
 		st:         st,
 		runner:     agent.NewRunner(),
-		res:        resource.NewManager(cfg.Resources),
+		res:        resource.NewManager(cfg.Get().Resources),
 		logger:     logger,
 		inFlight:   map[string]bool{},
 		reconciled: map[string]bool{},
 		announced:  map[string]gateNotice{},
-		sem:        make(chan struct{}, cfg.Orchestrator.MaxParallelJobs),
+		sem:        sem,
 	}
 }
 
@@ -59,7 +62,7 @@ func New(cfg *config.Config, st *store.Store, logger *log.Logger) *Engine {
 // for the process lifetime; on Windows an orphaned lock from a crashed engine
 // is removable (no open handle), a live one is not.
 func (e *Engine) acquireLock() error {
-	path := e.cfg.Orchestrator.LockFile
+	path := e.cfg.Get().Orchestrator.LockFile
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -81,7 +84,7 @@ func (e *Engine) acquireLock() error {
 func (e *Engine) releaseLock() {
 	if e.lockFile != nil {
 		e.lockFile.Close()
-		os.Remove(e.cfg.Orchestrator.LockFile)
+		os.Remove(e.cfg.Get().Orchestrator.LockFile)
 	}
 }
 
@@ -93,14 +96,22 @@ func (e *Engine) Run(ctx context.Context, once bool) error {
 	}
 	defer e.releaseLock()
 	e.logger.Printf("engine started (max_parallel_jobs=%d, poll=%s)",
-		e.cfg.Orchestrator.MaxParallelJobs, e.cfg.Orchestrator.PollInterval)
-	ticker := time.NewTicker(e.cfg.Orchestrator.PollInterval.D())
+		e.cfg.Get().Orchestrator.MaxParallelJobs, e.cfg.Get().Orchestrator.PollInterval)
+	pollInterval := e.cfg.Get().Orchestrator.PollInterval.D()
+	ticker := newTicker(pollInterval)
 	defer ticker.Stop()
 	for {
 		dispatched, pending, err := e.tick(ctx)
 		if err != nil {
 			e.logger.Printf("tick error: %v", err)
 		}
+		// A live edit to orchestrator.poll_interval must take effect without a
+		// restart. Reset re-arms the existing ticker at the new cadence rather
+		// than stopping and recreating it, so a tick already queued for soon
+		// is not lost or duplicated by the swap. maybeResetPollTicker is a
+		// separate method so this decision is testable against a fake ticker
+		// without a real engine run or real wall-clock ticks.
+		pollInterval = e.maybeResetPollTicker(ticker, pollInterval)
 		if once && !dispatched && pending == 0 && !e.anyInFlight() {
 			e.wg.Wait()
 			// A finished step may have produced new runnable work; loop once
@@ -116,10 +127,45 @@ func (e *Engine) Run(ctx context.Context, once bool) error {
 			e.logger.Printf("shutting down; waiting for in-flight steps...")
 			e.wg.Wait()
 			return nil
-		case <-ticker.C:
+		case <-ticker.C():
 		}
 	}
 }
+
+// maybeResetPollTicker compares the live config's current poll interval
+// against current (the interval t is already running at) and calls
+// t.Reset only when it moved, returning whichever interval is now in
+// effect. Called once per Run loop iteration so a config edit is picked up
+// within one tick, exactly like every other runtime-configurable setting.
+func (e *Engine) maybeResetPollTicker(t tickerSrc, current time.Duration) time.Duration {
+	want := e.cfg.Get().Orchestrator.PollInterval.D()
+	if want != current {
+		t.Reset(want)
+	}
+	return want
+}
+
+// tickerSrc is the slice of *time.Ticker's behavior Run needs. Production
+// always uses realTicker; a test substitutes a fake so the interval-change
+// detection above can be driven and observed deterministically, without
+// depending on real wall-clock ticks.
+type tickerSrc interface {
+	C() <-chan time.Time
+	Reset(d time.Duration)
+	Stop()
+}
+
+type realTicker struct{ t *time.Ticker }
+
+func (r realTicker) C() <-chan time.Time   { return r.t.C }
+func (r realTicker) Reset(d time.Duration) { r.t.Reset(d) }
+func (r realTicker) Stop()                 { r.t.Stop() }
+
+// newTicker constructs the ticker Run's loop is driven by. A package var
+// rather than a bare time.NewTicker call so a test can substitute a fake
+// ticker and prove the reset wiring above actually runs inside a real Run
+// loop, not just in isolation.
+var newTicker = func(d time.Duration) tickerSrc { return realTicker{time.NewTicker(d)} }
 
 func (e *Engine) anyInFlight() bool {
 	e.mu.Lock()
@@ -134,6 +180,12 @@ func (e *Engine) tick(ctx context.Context) (dispatched bool, pending int, err er
 	if err != nil {
 		return false, 0, err
 	}
+	// A live edit to orchestrator.max_parallel_jobs must be visible within one
+	// tick. Set once here, before the dispatch loop below, so every job this
+	// tick considers reads the same capacity — sem is a resizableSem rather
+	// than a fixed-size chan struct{} exactly because a channel cannot be
+	// resized.
+	e.sem.SetCapacity(e.cfg.Get().Orchestrator.MaxParallelJobs)
 	now := time.Now()
 	for _, j := range jobs {
 		if isTerminal(j.State) {
@@ -160,8 +212,8 @@ func (e *Engine) tick(ctx context.Context) (dispatched bool, pending int, err er
 			continue
 		}
 		// Job-age budget.
-		if now.Sub(j.CreatedAt) > e.cfg.Limits.MaxJobDuration.D() {
-			e.hold(j, STimedOut, fmt.Sprintf("exceeded limits.max_job_duration (%s)", e.cfg.Limits.MaxJobDuration))
+		if now.Sub(j.CreatedAt) > e.cfg.Get().Limits.MaxJobDuration.D() {
+			e.hold(j, STimedOut, fmt.Sprintf("exceeded limits.max_job_duration (%s)", e.cfg.Get().Limits.MaxJobDuration))
 			continue
 		}
 		// Quota suspension.
@@ -193,9 +245,7 @@ func (e *Engine) tick(ctx context.Context) (dispatched bool, pending int, err er
 			// fallthrough: approval transitioned it to a runnable state
 		}
 		pending++
-		select {
-		case e.sem <- struct{}{}:
-		default:
+		if !e.sem.TryAcquire() {
 			continue // parallel cap reached
 		}
 		e.setInFlight(j.ID, true)
@@ -203,7 +253,7 @@ func (e *Engine) tick(ctx context.Context) (dispatched bool, pending int, err er
 		e.wg.Add(1)
 		go func(j *store.Job) {
 			defer e.wg.Done()
-			defer func() { e.setInFlight(j.ID, false); <-e.sem }()
+			defer func() { e.setInFlight(j.ID, false); e.sem.Release() }()
 			e.step(ctx, j)
 		}(j)
 	}
@@ -300,6 +350,35 @@ func (e *Engine) handleGate(ctx context.Context, j *store.Job) error {
 	_ = e.st.ConsumeApproval(a.ID)
 	e.event(j, "approval", map[string]any{"gate": gate, "decision": a.Decision, "reason": a.Reason})
 	switch {
+	case gate == review.GateScope && a.Decision == "approve":
+		// Approval with questions outstanding is a waiver: planning proceeds on
+		// the recorded assumptions. Naming the waived questions is the point —
+		// a waiver nobody can find later is indistinguishable from a question
+		// that was never asked.
+		if prob, err := artifact.LoadProblem(
+			filepath.Join(artifact.ArtifactsDir(e.cfg.Get().Orchestrator.DataDir, j.ID), "problem.json"),
+		); err == nil {
+			if blocking := prob.BlockingQuestions(); len(blocking) > 0 {
+				ids := make([]string, 0, len(blocking))
+				for _, q := range blocking {
+					ids = append(ids, q.ID)
+				}
+				e.event(j, "note", map[string]any{"scope_questions_waived": ids})
+			}
+		}
+		e.transition(j, SPlanning, "scope approved")
+	case gate == review.GateScope && a.Decision == "reject":
+		if a.Cancel {
+			e.transition(j, SCancelled, "scope rejected (cancelled): "+a.Reason)
+			e.cleanup(ctx, j)
+		} else {
+			// Unlike the spec gate, this counter IS spent on a human decision:
+			// re-scoping is a conversation between the operator and the agent,
+			// and max_scope_rounds is what stops it running forever.
+			j.Counters.ScopeRounds++
+			j.Counters.HumanRejectReason = a.Reason
+			e.transition(j, SScoping, "scope rejected: "+a.Reason)
+		}
 	case gate == review.GateSpec && a.Decision == "approve":
 		e.transition(j, SImplementing, "spec approved")
 	case gate == review.GateSpec && a.Decision == "reject":
@@ -354,7 +433,7 @@ func (e *Engine) step(ctx context.Context, j *store.Job) {
 			e.hold(j, SEscalated, fmt.Sprintf("panic in %s: %v", j.State, r))
 		}
 	}()
-	target, err := e.cfg.Target(j.Target)
+	target, err := e.cfg.Get().Target(j.Target)
 	if err != nil {
 		e.hold(j, SEscalated, err.Error())
 		return
@@ -386,7 +465,7 @@ func (e *Engine) step(ctx context.Context, j *store.Job) {
 	}
 
 	// Agent-invocation budget guardrail (SPEC §13.5).
-	if isAgentState(j.State) && j.Counters.AgentInvocations >= e.cfg.Limits.MaxAgentInvocationsPerJob {
+	if isAgentState(j.State) && j.Counters.AgentInvocations >= e.cfg.Get().Limits.MaxAgentInvocationsPerJob {
 		e.hold(j, SEscalated, fmt.Sprintf("agent budget exhausted (%d invocations)", j.Counters.AgentInvocations))
 		return
 	}
@@ -397,6 +476,8 @@ func (e *Engine) step(ctx context.Context, j *store.Job) {
 	switch j.State {
 	case SCreated:
 		next, herr = jc.handleCreated(ctx)
+	case SScoping:
+		next, herr = jc.handleScoping(ctx)
 	case SPlanning:
 		next, herr = jc.handlePlanning(ctx)
 	case SDesignReview:
@@ -513,12 +594,12 @@ func (e *Engine) event(j *store.Job, kind string, detail map[string]any) {
 
 // cleanup removes the worktree (and optionally branch) per git.* config.
 func (e *Engine) cleanup(ctx context.Context, j *store.Job) {
-	mode := e.cfg.Git.CleanupWorktrees
+	mode := e.cfg.Get().Git.CleanupWorktrees
 	success := j.State == SCompleted
 	if mode == "never" || (mode == "on_success" && !success) {
 		return
 	}
-	target, err := e.cfg.Target(j.Target)
+	target, err := e.cfg.Get().Target(j.Target)
 	if err != nil {
 		return
 	}
@@ -526,7 +607,7 @@ func (e *Engine) cleanup(ctx context.Context, j *store.Job) {
 	if err := repo.RemoveWorktree(ctx, j.WorktreePath); err != nil {
 		e.logger.Printf("%s: cleanup worktree: %v", j.ID, err)
 	}
-	if success && e.cfg.Git.DeleteBranchOnSuccess {
+	if success && e.cfg.Get().Git.DeleteBranchOnSuccess {
 		if err := repo.DeleteBranch(ctx, j.Branch); err != nil {
 			e.logger.Printf("%s: delete branch: %v", j.ID, err)
 		}

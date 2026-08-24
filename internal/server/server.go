@@ -46,7 +46,7 @@ const maxFormBytes = 1 << 20
 const readHeaderTimeout = 10 * time.Second
 
 type Server struct {
-	cfg     *config.Config
+	cfg     *config.Live
 	st      *store.Store
 	log     *log.Logger // never nil
 	verbose bool
@@ -72,7 +72,7 @@ type Server struct {
 // New parses the templates and hashes the assets up front: a template that does
 // not parse must stop `sdlc serve` from starting, not surface as a 500 on the
 // one page nobody opened until a gate was waiting.
-func New(cfg *config.Config, st *store.Store, lg *log.Logger, verbose bool) (*Server, error) {
+func New(cfg *config.Live, st *store.Store, lg *log.Logger, verbose bool) (*Server, error) {
 	if lg == nil {
 		lg = log.New(os.Stderr, "", log.LstdFlags)
 	}
@@ -221,6 +221,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /jobs/{id}/prompts/{name}", s.handlePrompt)
 	mux.HandleFunc("GET /submit", s.handleSubmitForm)
 	mux.HandleFunc("GET /config", s.handleConfig)
+	mux.HandleFunc("GET /config/history", s.handleConfigHistory)
+	mux.HandleFunc("GET /config/history/{name}", s.handleConfigHistoryEntry)
 	mux.HandleFunc("GET "+staticPrefix+"{path...}", s.serveStatic)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -241,6 +243,10 @@ func (s *Server) Handler() http.Handler {
 	// takes requireFreshState.
 	mux.HandleFunc("POST /submit", s.requireCSRF(s.handleSubmit))
 	mux.HandleFunc("POST /prefs/diff-view", s.requireCSRF(s.handleDiffViewPref))
+	// POST /config is a form re-render on refusal, not a decision (see the
+	// comment at handleConfigSave): requireCSRF only, no requireFreshState —
+	// there is no job state for a config edit to be stale against.
+	mux.HandleFunc("POST /config", s.requireCSRF(s.handleConfigSave))
 
 	// --- 5.3 live and data ----------------------------------------------
 	mux.HandleFunc("GET /events/stream", s.handleStream)
@@ -366,7 +372,7 @@ func (s *Server) page(r *http.Request, title, nav string, body any) pageData {
 // ambiguous. The banner's wording hedges to match; anything more confident
 // would be a claim this cannot support (spec §13.8).
 func (s *Server) engineUp() bool {
-	p := s.cfg.Orchestrator.LockFile
+	p := s.cfg.Get().Orchestrator.LockFile
 	if p == "" {
 		return false
 	}
@@ -429,7 +435,7 @@ func (s *Server) job(w http.ResponseWriter, r *http.Request) (*store.Job, bool) 
 
 // target resolves the job's target or answers 500 and reports false.
 func (s *Server) target(w http.ResponseWriter, r *http.Request, j *store.Job) (config.Target, bool) {
-	t, err := s.cfg.Target(j.Target)
+	t, err := s.cfg.Get().Target(j.Target)
 	if err != nil {
 		// 500 rather than 404: the job is real and the config is what is
 		// wrong, which is the operator's to fix and not the URL's.

@@ -252,7 +252,7 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, j *store.Job, a 
 // calls. Re-validating here — even "just" the title — is how the two surfaces
 // would come to disagree about what a valid submission is.
 func (s *Server) handleSubmit(w http.ResponseWriter, r *http.Request) {
-	job, err := jobs.Submit(s.cfg, s.st, jobs.SubmitRequest{
+	job, err := jobs.Submit(s.cfg.Get(), s.st, jobs.SubmitRequest{
 		Target: r.PostFormValue("target"),
 		Title:  r.PostFormValue("title"),
 		Body:   r.PostFormValue("body"),
@@ -340,6 +340,61 @@ func backTo(r *http.Request) string {
 		out += "?" + u.RawQuery
 	}
 	return out
+}
+
+// --- config save -----------------------------------------------------------
+
+// handleConfigSave applies a full-file edit through config.Live.Apply and is
+// the one handler in this package that does not answer 303 on every path.
+//
+// AC-15 ("every POST answers 303") is about not letting a reload re-post a
+// *decision* — the four gate actions above, and submit: those write a row,
+// and a browser that re-fetched the same URL after a redirect must get a GET,
+// never a second copy of the same POST. Saving a config edit is not a
+// decision, it is a form, and a multi-hundred-line document failing
+// validation is a validation error on a form, not a decision to re-litigate.
+// Re-rendering it here, in place, at 200 — with the exact error and the exact
+// text that failed, still in the box — is what stops a typo from also
+// costing the operator their edit; a 303 would have to carry that arbitrary-
+// length text through the redirect with nowhere honest to put it. And because
+// this response was never a redirect, reloading it re-submits nothing: there
+// is no POST left in the browser's history to repeat.
+func (s *Server) handleConfigSave(w http.ResponseWriter, r *http.Request) {
+	submitted := r.PostFormValue("config")
+	res := s.cfg.Apply([]byte(submitted))
+	if res.Applied {
+		// 303 rather than 302, matching record(): the reload that follows
+		// must be a GET of /config, not a re-POST of the same body.
+		http.Redirect(w, r, "/config?saved=1", http.StatusSeeOther)
+		return
+	}
+
+	body, err := s.buildConfigPage()
+	if err != nil {
+		s.log.Printf("re-marshalling config: %v", err)
+		s.fail(w, r, http.StatusInternalServerError, "the loaded config could not be re-marshalled to YAML")
+		return
+	}
+	// The submitted text, not what buildConfigPage just read off disk: the
+	// whole point of re-rendering here instead of redirecting is that this is
+	// the text the operator is looking at and about to fix, not what a
+	// refused save left unchanged on disk.
+	body.RawText = submitted
+	switch {
+	case len(res.RestartFields) > 0:
+		body.SaveErr = fmt.Sprintf(
+			"not saved: this edit changes %s, which only takes effect once both sdlc run and sdlc serve are restarted — edit something else, or apply this change and restart both processes yourself",
+			strings.Join(res.RestartFields, ", "))
+	case res.Err != nil:
+		body.SaveErr = "not saved: " + res.Err.Error()
+	default:
+		// config.Live.Apply's own contract: exactly one of Applied, a
+		// non-empty RestartFields, or Err is true of any ReloadResult. Landing
+		// here would mean that contract broke, and a blank error would hide
+		// that something had clearly gone wrong rather than say so.
+		body.SaveErr = "not saved: the edit was refused for an unknown reason"
+	}
+	s.render(w, r, "config.html", s.page(r, "Config", "config", body))
 }
 
 // --- form helpers --------------------------------------------------------

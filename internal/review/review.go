@@ -29,6 +29,7 @@ import (
 // Gate names. These are the values written to approvals.gate, and the
 // filenames of the rendered documents.
 const (
+	GateScope   = "scope"
 	GateSpec    = "spec"
 	GateCode    = "code"
 	GateMerge   = "merge"
@@ -93,6 +94,8 @@ type Doc struct {
 // is not waiting on anybody.
 func GateFor(state string) string {
 	switch state {
+	case "AWAITING_SCOPE_APPROVAL":
+		return GateScope
 	case "AWAITING_SPEC_APPROVAL":
 		return GateSpec
 	case "AWAITING_CODE_APPROVAL":
@@ -223,6 +226,9 @@ func Render(ctx context.Context, o Options) (*Doc, error) {
 	)
 
 	switch gate {
+	case GateScope:
+		renderIssue(&d.Blocks, o.Job)
+		renderProblem(&d.Blocks, art)
 	case GateSpec:
 		renderIssue(&d.Blocks, o.Job)
 		renderSpec(&d.Blocks, art)
@@ -264,6 +270,8 @@ func Render(ctx context.Context, o Options) (*Doc, error) {
 
 func gateTitle(gate string, o Options) string {
 	switch gate {
+	case GateScope:
+		return "Approve the scoped problem before a spec is written."
 	case GateSpec:
 		return "Approve the spec and plan before any code is written."
 	case GateCode:
@@ -288,6 +296,80 @@ func renderIssue(bs *[]Block, j *store.Job) {
 		section("Issue"),
 		Block{Kind: BlockQuote, Text: text, Truncated: truncated},
 	)
+}
+
+// renderProblem prints the scoped problem and says why the job is parked. The
+// two causes — the agent raised a blocking question, or human_gates asks for a
+// checkpoint — need different responses from the operator, so the document
+// distinguishes them rather than leaving them to be inferred from the presence
+// of a questions section.
+func renderProblem(bs *[]Block, art string) {
+	p, err := artifact.LoadProblem(filepath.Join(art, "problem.json"))
+	if err != nil {
+		*bs = append(*bs, section("Scoped problem"),
+			aside("problem.json is missing or unreadable: "+err.Error()))
+		return
+	}
+	*bs = append(*bs, section("Scoped problem"), para(txt(p.ProblemStatement)))
+	bullets(bs, "In scope", p.InScope)
+	bullets(bs, "Out of scope", p.OutOfScope)
+	bullets(bs, "Success criteria", p.SuccessCriteria)
+
+	if len(p.Assumptions) > 0 {
+		items := make([]Item, 0, len(p.Assumptions))
+		for _, a := range p.Assumptions {
+			items = append(items, Item{
+				Spans: []Span{txt(a.Assumption)},
+				Sub:   [][]Span{{Span{Kind: SpanEmphasis, Text: "basis: " + a.Basis}}},
+			})
+		}
+		*bs = append(*bs, section("Assumptions"), Block{Kind: BlockBullets, Items: items})
+	}
+
+	blocking := p.BlockingQuestions()
+	if len(p.OpenQuestions) > 0 {
+		// Blocking questions first: they are the ones an answer is needed for.
+		ordered := append(append([]artifact.OpenQuestion{}, blocking...), nonBlocking(p)...)
+		items := make([]Item, 0, len(ordered))
+		for _, q := range ordered {
+			label := q.ID + ": " + q.Question
+			if !q.Blocking {
+				label += " (not blocking)"
+			}
+			it := Item{Spans: []Span{txt(label)}}
+			if q.WhyItMatters != "" {
+				it.Sub = [][]Span{{Span{Kind: SpanEmphasis, Text: "why it matters: " + q.WhyItMatters}}}
+			}
+			items = append(items, it)
+		}
+		*bs = append(*bs, section("Open questions"), Block{Kind: BlockBullets, Items: items})
+	}
+
+	if len(blocking) > 0 {
+		// aside, not asideOf: this remark quotes no command or path, and
+		// asideOf exists for the ones that do.
+		*bs = append(*bs, aside(fmt.Sprintf(
+			"The scoping agent is blocked on %d question(s) and will not write a spec until they are settled. "+
+				"Rejecting with your answers re-scopes; approving waives them and plans on the assumptions above.",
+			len(blocking))))
+		return
+	}
+	*bs = append(*bs, asideOf(
+		txt("The scoping agent reported clarity "), code(p.Clarity),
+		txt(" and raised nothing blocking. This job is parked because "), code("policies.human_gates"),
+		txt(" lists "), code("scope"), txt("."),
+	))
+}
+
+// nonBlocking is the complement of Problem.BlockingQuestions.
+func nonBlocking(p *artifact.Problem) []artifact.OpenQuestion {
+	var out []artifact.OpenQuestion
+	for _, q := range p.OpenQuestions {
+		if !q.Blocking {
+			out = append(out, q)
+		}
+	}
+	return out
 }
 
 func renderSpec(bs *[]Block, art string) {
@@ -466,6 +548,11 @@ func renderActions(bs *[]Block, gate string, o Options) {
 	blk := Block{Kind: BlockActions}
 	text := func(s string) []Span { return []Span{{Kind: SpanText, Text: s}} }
 	switch gate {
+	case GateScope:
+		blk.Actions = []Action{
+			{Decision: "approve", Effect: text("planning starts from this problem statement; any open questions are waived")},
+			{Decision: "reject", Effect: text("scoping runs again with your answers as its instruction")},
+		}
 	case GateSpec:
 		blk.Actions = []Action{
 			{Decision: "approve", Effect: text("implementation starts from this plan")},

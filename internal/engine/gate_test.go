@@ -44,7 +44,7 @@ func (e *env) parkAt(state, title string) *store.Job {
 func (e *env) tickingEngine() (*Engine, *syncBuf) {
 	e.t.Helper()
 	buf := &syncBuf{}
-	return New(e.cfg, e.st, log.New(buf, "", 0)), buf
+	return New(config.NewLive(e.cfg), e.st, log.New(buf, "", 0)), buf
 }
 
 // backdateNotice ages the remembered notice by d, which is how these tests ask

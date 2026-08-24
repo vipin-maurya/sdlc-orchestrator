@@ -356,3 +356,99 @@ func TestListenPortAcceptsOnlyPlainDecimal(t *testing.T) {
 		t.Error("port 0 was accepted in a config file")
 	}
 }
+
+func TestScopingDefaults(t *testing.T) {
+	c := Default()
+	st, ok := c.States[StScoping]
+	if !ok {
+		t.Fatal("Default() has no SCOPING state")
+	}
+	if st.Agent != "opus" {
+		t.Errorf("SCOPING agent=%q, want opus", st.Agent)
+	}
+	if !c.Policies.ScopingEnabled() {
+		t.Error("scoping is off by default; it must default on")
+	}
+	if c.Limits.MaxScopeRounds != 2 {
+		t.Errorf("max_scope_rounds=%d, want 2", c.Limits.MaxScopeRounds)
+	}
+	// A state absent from AgentStates is never backfilled and never validated.
+	found := false
+	for _, s := range AgentStates {
+		if s == StScoping {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("SCOPING is not in AgentStates")
+	}
+}
+
+func TestScopingPolicyValidation(t *testing.T) {
+	for _, v := range []string{"on", "off"} {
+		c := Default()
+		c.Policies.Scoping = v
+		if err := c.Validate(); err != nil {
+			t.Errorf("policies.scoping %q rejected: %v", v, err)
+		}
+	}
+	c := Default()
+	c.Policies.Scoping = "sometimes"
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "scoping") {
+		t.Errorf("policies.scoping \"sometimes\" accepted or unnamed: %v", err)
+	}
+	if c.Policies.ScopingEnabled() {
+		t.Error("an invalid value must not read as enabled")
+	}
+}
+
+func TestScopeIsAValidHumanGate(t *testing.T) {
+	c := Default()
+	c.Policies.HumanGates = []string{"scope"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("human_gates: [scope] rejected: %v", err)
+	}
+	if !c.Policies.HumanGate("scope") {
+		t.Error("HumanGate(\"scope\") is false after human_gates: [scope]")
+	}
+	if c.Policies.HumanGate("spec") {
+		t.Error("human_gates: [scope] enabled the spec gate as well")
+	}
+}
+
+// A config written before this feature has no SCOPING entry and must still
+// load, with the default backfilled by applyComputedDefaults.
+func TestConfigWithoutScopingStateBackfills(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "sdlc.yaml")
+	body := "states:\n  PLANNING: { agent: opus, timeout: 30m }\n"
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("pre-feature config rejected: %v", err)
+	}
+	if c.States[StScoping].Agent == "" {
+		t.Error("SCOPING was not backfilled")
+	}
+}
+
+// sdlc.example.yaml is what new users start from and what CI validates
+// against; it must parse cleanly with the new scoping policy and limits.
+func TestExampleConfigParsesCleanly(t *testing.T) {
+	cfg, err := Load("../../sdlc.example.yaml")
+	if err != nil {
+		t.Fatalf("sdlc.example.yaml failed to parse: %v", err)
+	}
+	if !cfg.Policies.ScopingEnabled() {
+		t.Error("example config should have scoping enabled by default")
+	}
+	if cfg.Limits.MaxScopeRounds != 2 {
+		t.Errorf("limits.max_scope_rounds = %d, want 2", cfg.Limits.MaxScopeRounds)
+	}
+	if _, ok := cfg.States[StScoping]; !ok {
+		t.Error("example config missing states.SCOPING")
+	}
+}

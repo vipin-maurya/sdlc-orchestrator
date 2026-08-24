@@ -30,6 +30,13 @@ import (
 
 const Version = "0.1.0"
 
+// configWatchInterval is how often `sdlc run` and `sdlc serve` each poll
+// sdlc.yaml for changes via their own config.Live.Watch loop. It is
+// infrastructure for the config system, not a setting the config system
+// itself governs — it must never become an sdlc.yaml key, or the interval
+// that governs reload would itself need to be reloaded to change.
+const configWatchInterval = 2 * time.Second
+
 const usage = `sdlc — autonomous SDLC orchestrator
 
 Usage:
@@ -242,7 +249,13 @@ func cmdRun(cfg *config.Config, args []string) int {
 	defer st.Close()
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	eng := engine.New(cfg, st, log.New(os.Stdout, "", log.LstdFlags))
+	logger := log.New(os.Stdout, "", log.LstdFlags)
+	// live is this process's own config.Live; sdlc serve, if also running,
+	// has its own — the two only ever agree through the file on disk, exactly
+	// like a person hand-editing it would cause either to notice.
+	live := config.NewLive(cfg)
+	go live.Watch(ctx, configWatchInterval, logger)
+	eng := engine.New(live, st, logger)
 	if err := eng.Run(ctx, *once); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
@@ -326,11 +339,13 @@ func statusOne(cfg *config.Config, st *store.Store, id string) int {
 		fmt.Printf("  resumes:   %s\n", j.ResumeAfter.Local().Format(time.RFC3339))
 	}
 	c := j.Counters
-	fmt.Printf("  counters:  design_review=%d code_review=%d fixes=%d flake=%d release=%d agent_invocations=%d\n",
-		c.DesignReviewRounds, c.CodeReviewRounds, c.FixAttempts, c.FlakeRetries, c.ReleaseRetries, c.AgentInvocations)
+	fmt.Printf("  counters:  scope_rounds=%d design_review=%d code_review=%d fixes=%d flake=%d release=%d agent_invocations=%d\n",
+		c.ScopeRounds, c.DesignReviewRounds, c.CodeReviewRounds, c.FixAttempts, c.FlakeRetries, c.ReleaseRetries, c.AgentInvocations)
 	fmt.Printf("  artifacts: %s\n", artifact.ArtifactsDir(cfg.Orchestrator.DataDir, j.ID))
 	printLastProgress(st, j)
 	switch j.State {
+	case engine.SAwaitScope:
+		fmt.Println("\n  ACTION NEEDED: approve the scoped problem before a spec is written")
 	case engine.SAwaitSpec:
 		fmt.Println("\n  ACTION NEEDED: approve the spec and plan before any code is written")
 	case engine.SAwaitCode:

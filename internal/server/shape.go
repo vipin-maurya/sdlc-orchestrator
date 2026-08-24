@@ -26,7 +26,7 @@ type phase struct {
 }
 
 var phases = []phase{
-	{"PLANNING", []string{"CREATED", "PLANNING"}},
+	{"PLANNING", []string{"CREATED", "SCOPING", "AWAITING_SCOPE_APPROVAL", "PLANNING"}},
 	{"DESIGN_REVIEW", []string{"DESIGN_REVIEW", "AWAITING_SPEC_APPROVAL"}},
 	{"IMPLEMENTING", []string{"IMPLEMENTING"}},
 	{"CODE_REVIEW", []string{"CODE_REVIEW", "AWAITING_CODE_APPROVAL"}},
@@ -133,7 +133,7 @@ func gateClass(gate string) string {
 		return "bad"
 	case "merge", "release":
 		return "warn"
-	case "spec", "code":
+	case "scope", "spec", "code":
 		return "info"
 	}
 	return ""
@@ -151,7 +151,7 @@ var (
 	terminalStates = []string{"COMPLETED", "CANCELLED", "FAILED"}
 	// parkedStates: waiting on an approval row, no work to dispatch.
 	parkedStates = []string{
-		"AWAITING_SPEC_APPROVAL", "AWAITING_CODE_APPROVAL",
+		"AWAITING_SCOPE_APPROVAL", "AWAITING_SPEC_APPROVAL", "AWAITING_CODE_APPROVAL",
 		"AWAITING_MERGE_APPROVAL", "AWAITING_RELEASE_APPROVAL",
 	}
 	// heldStates: durable holds a human clears with `sdlc resume`.

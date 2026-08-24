@@ -6,6 +6,7 @@ import "github.com/vipinm/sdlc-orchestrator/internal/config"
 // package so the states: mapping uses the same strings.
 const (
 	SCreated      = "CREATED"
+	SScoping      = config.StScoping
 	SPlanning     = config.StPlanning
 	SDesignReview = config.StDesignReview
 	SImplementing = config.StImplementing
@@ -19,6 +20,9 @@ const (
 	// SVerifying is a configuration key, not a pipeline state: the verify
 	// pass runs inside the three review states, never as a state of its own.
 	SVerifying = config.StVerifying
+	// SAwaitScope is where a job waits when the scoping agent raised a blocking
+	// question, or when policies.human_gates asks for a scope checkpoint.
+	SAwaitScope = "AWAITING_SCOPE_APPROVAL"
 	// The spec and code gates exist only when policies.human_gates asks for
 	// them; with the key absent the pipeline never reaches these two states.
 	SAwaitSpec    = "AWAITING_SPEC_APPROVAL"
@@ -57,7 +61,7 @@ func isHeld(s string) bool {
 // Parked states: waiting on an approval row, no work to dispatch.
 func isParked(s string) bool {
 	switch s {
-	case SAwaitSpec, SAwaitCode, SAwaitMerge, SAwaitRelease:
+	case SAwaitScope, SAwaitSpec, SAwaitCode, SAwaitMerge, SAwaitRelease:
 		return true
 	}
 	return false
@@ -67,7 +71,7 @@ func isParked(s string) bool {
 // A held job can only re-enter a state that actually runs work; sending it to
 // a terminal, parked or held state would either do nothing or wedge it.
 var resumable = []string{
-	SPlanning, SDesignReview, SImplementing, SCodeReview,
+	SScoping, SPlanning, SDesignReview, SImplementing, SCodeReview,
 	SBuilding, STesting, SFlakeCheck, SAnalyzing, SFixing, SFinalReview,
 	SMerging, SReleasing,
 }

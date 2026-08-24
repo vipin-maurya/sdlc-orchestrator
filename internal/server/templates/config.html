@@ -1,17 +1,21 @@
-{{/* The read-only config (spec §5.1, §2.2). Owner: W2-H.
+{{/* The config page (spec §5.1): a read-only decoded view, and — below it —
+     the raw-file editor. Owner: W2-H.
 
-     Read-only means there is no form on this page at all. The config decides
-     which backend reviews which state and what the release command is; it is
-     edited in a file, validated at load, and shown here as the thing that was
-     actually loaded — which is not always the same as the thing on disk, since
-     defaults are filled in and ${VAR} is expanded before this struct exists.
+     The decoded view above the editor never changes shape for this feature:
+     it is the config after ${VAR} expansion and defaults, credential-shaped
+     values replaced with [redacted], because config.Load expands ${VAR} into
+     the loaded struct and a page that printed it unredacted would print
+     tokens. Everything from here down to "Loaded config as YAML" is exactly
+     what it always was, and carries no form.
 
-     That expansion is also why the YAML below is redacted rather than printed:
-     a token that was a ${VAR} in the file is a token in the loaded struct.
-
-     The sections above the YAML are the same struct in the shape a reader asks
-     questions in. They are an index into the record, not a replacement for it,
-     which is why the whole YAML is still on the page underneath. */}}
+     The editor below it is a different view of a different thing: the raw
+     bytes at Path, before expansion, before defaults. That is safe to show
+     and to round-trip unredacted because ${VAR} expansion happens on this raw
+     text *before* it is parsed (config.expandEnv, inside config.Parse) — the
+     file on disk is meant to hold "${GITHUB_TOKEN}", never a literal secret.
+     A box that shows exactly what's on disk never needs to redact anything it
+     round-trips; the paragraph below the textarea says so, because that
+     guarantee only holds if the operator keeps to the convention. */}}
 {{define "content"}}
 {{with .Body}}
 <div class="meta" style="margin-bottom: 1rem;">
@@ -19,8 +23,9 @@
   <span>{{if .Path}}{{.Path}}{{else}}built-in defaults — no config file was loaded{{end}}</span>
 </div>
 
-<p class="note">This page is read-only. The config is edited in a file and validated
-  at load; nothing here writes anything.</p>
+<p class="note">The sections and YAML below are the config as loaded — after
+  ${VAR} expansion and defaults are filled in — and read-only. The editor further
+  down is a different view: the raw file, for saving an edit.</p>
 
 {{if .Redacted}}
 <p class="note warn" style="margin-top: .6rem;">Values that name or look like a credential
@@ -68,5 +73,44 @@
 
 <h2>Loaded config as YAML</h2>
 <pre>{{.YAML}}</pre>
+
+<h2 style="margin-top: 2rem;">Edit the config file</h2>
+
+{{if .Path}}
+
+{{if .Saved}}
+<p class="note ok">Saved. This process is running on the new config immediately — no
+  restart. <code>sdlc run</code>, if it is a separate process, picks it up on its own
+  next poll (within a couple of seconds).</p>
+{{end}}
+{{if .LoadedFrom}}
+<p class="note warn">Showing history version <code>{{.LoadedFrom}}</code>, not what is
+  currently on disk. Nothing has been saved yet — Save below writes this text back as
+  the current config.</p>
+{{end}}
+{{if .SaveErr}}
+<p class="note bad">{{.SaveErr}}</p>
+{{end}}
+
+<p class="note">This box holds exactly the bytes at <code>{{.Path}}</code> — this shows
+  exactly what's on disk: keep secrets in environment variables as <code>${VAR}</code>
+  placeholders, not literal values, or they will be visible here (and to anyone this
+  page is shared with). See <a href="/config/history">history</a> for previously saved
+  versions.</p>
+
+<form method="post" action="/config">
+  <input type="hidden" name="csrf" value="{{$.CSRF}}">
+  <textarea name="config" spellcheck="false"
+            style="min-height: 28rem; width: 100%; box-sizing: border-box;">{{.RawText}}</textarea>
+  <p style="margin-top: .6rem;">
+    <button class="primary" type="submit">Save</button>
+    <a href="/config/history" style="margin-left: .8rem;">History</a>
+  </p>
+</form>
+
+{{else}}
+<p class="note warn">No config file was loaded — this process is running on built-in
+  defaults, so there is nothing on disk to edit.</p>
+{{end}}
 {{end}}
 {{end}}

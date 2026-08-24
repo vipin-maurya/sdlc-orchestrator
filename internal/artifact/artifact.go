@@ -237,6 +237,63 @@ type Analysis struct {
 	FixHint        string   `json:"fix_hint"`
 }
 
+// Assumption is one ambiguity the scoping agent resolved on its own. The basis
+// is not decoration: an assumption without the evidence behind it is
+// indistinguishable from a guess, and the whole value of the field to a
+// downstream reader is being able to check the reasoning in one glance.
+type Assumption struct {
+	Assumption string `json:"assumption"`
+	Basis      string `json:"basis"`
+}
+
+// OpenQuestion is an ambiguity the scoping agent could not resolve. Blocking
+// is reserved for a choice where the answers lead to materially different work
+// and nothing in the repository decides between them; anything with a
+// defensible default belongs in Assumptions instead.
+type OpenQuestion struct {
+	ID           string `json:"id"`
+	Question     string `json:"question"`
+	WhyItMatters string `json:"why_it_matters"`
+	Blocking     bool   `json:"blocking"`
+}
+
+// Problem is the scoped statement of what the job is for (schema problem/1).
+// It is written by SCOPING before any spec exists, and it is what PLANNING is
+// bound by and DESIGN_REVIEW checks the spec against.
+type Problem struct {
+	Schema           string         `json:"schema"`
+	ProblemStatement string         `json:"problem_statement"`
+	InScope          []string       `json:"in_scope"`
+	OutOfScope       []string       `json:"out_of_scope"`
+	SuccessCriteria  []string       `json:"success_criteria"`
+	Assumptions      []Assumption   `json:"assumptions"`
+	OpenQuestions    []OpenQuestion `json:"open_questions"`
+	// Clarity routes the job out of SCOPING: clear | assumed | blocked.
+	// LoadProblem holds it to the rest of the artifact in both directions, so
+	// it is a checked claim rather than a declaration.
+	Clarity string `json:"clarity"`
+}
+
+// Clarity values.
+const (
+	ClarityClear   = "clear"
+	ClarityAssumed = "assumed"
+	ClarityBlocked = "blocked"
+)
+
+// BlockingQuestions returns the questions that stop the job. The engine routes
+// on it and the gate document prints it, so the definition of "blocking" lives
+// in one place.
+func (p Problem) BlockingQuestions() []OpenQuestion {
+	var out []OpenQuestion
+	for _, q := range p.OpenQuestions {
+		if q.Blocking {
+			out = append(out, q)
+		}
+	}
+	return out
+}
+
 // --- Loading + validation ----------------------------------------------
 
 // bom is the UTF-8 byte-order mark. Agents writing through PowerShell (or
@@ -439,4 +496,65 @@ func LoadAnalysis(path string) (*Analysis, error) {
 		return nil, vErr(path, "reasoning required")
 	}
 	return &a, nil
+}
+
+var validClarities = map[string]bool{
+	ClarityClear: true, ClarityAssumed: true, ClarityBlocked: true,
+}
+
+func LoadProblem(path string) (*Problem, error) {
+	var p Problem
+	if err := ReadJSON(path, &p); err != nil {
+		return nil, err
+	}
+	var missing []string
+	if p.Schema != "problem/1" {
+		missing = append(missing, `schema (must be "problem/1")`)
+	}
+	if strings.TrimSpace(p.ProblemStatement) == "" {
+		missing = append(missing, "problem_statement (non-empty)")
+	}
+	if len(p.InScope) == 0 {
+		missing = append(missing, "in_scope (non-empty)")
+	}
+	if len(p.OutOfScope) == 0 {
+		missing = append(missing, "out_of_scope (non-empty)")
+	}
+	if len(p.SuccessCriteria) == 0 {
+		missing = append(missing, "success_criteria (non-empty)")
+	}
+	if len(missing) > 0 {
+		return nil, vErr(path, "missing or invalid required field(s): %s; keys actually present: %s",
+			strings.Join(missing, ", "), presentKeys(path))
+	}
+	if !validClarities[p.Clarity] {
+		return nil, vErr(path, "clarity %q invalid (clear|assumed|blocked)", p.Clarity)
+	}
+	seen := make(map[string]bool, len(p.OpenQuestions))
+	for i, q := range p.OpenQuestions {
+		if q.ID == "" || strings.TrimSpace(q.Question) == "" {
+			return nil, vErr(path, "open_questions[%d]: id and question are required", i)
+		}
+		if seen[q.ID] {
+			return nil, vErr(path, "open_questions[%d]: duplicate id %q", i, q.ID)
+		}
+		seen[q.ID] = true
+	}
+	// The clarity field decides whether a human is asked, so it is held to the
+	// rest of the artifact in BOTH directions. Without the forward check an
+	// agent can claim to be blocked with nothing to ask, and the job parks on a
+	// question that was never written down. Without the reverse check an agent
+	// can raise a blocking question and still route itself straight past the
+	// human, which is the whole thing this state exists to prevent.
+	blocking := len(p.BlockingQuestions())
+	if p.Clarity == ClarityBlocked && blocking == 0 {
+		return nil, vErr(path, `clarity is "blocked" but no open_questions entry has blocking: true; say what you need answered`)
+	}
+	if p.Clarity != ClarityBlocked && blocking > 0 {
+		return nil, vErr(path, `%d open_questions entr(y/ies) are blocking: true, so clarity must be "blocked", not %q`, blocking, p.Clarity)
+	}
+	if p.Clarity == ClarityAssumed && len(p.Assumptions) == 0 {
+		return nil, vErr(path, `clarity is "assumed" but assumptions is empty; name what you assumed and on what basis`)
+	}
+	return &p, nil
 }

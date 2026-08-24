@@ -95,7 +95,19 @@ func runServe(ctx context.Context, cfg *config.Config, listen string, verbose bo
 	// The server's log shares this console with the address banner and with any
 	// panic the recover middleware reports, so it goes to the same stream
 	// rather than to stderr, where the two would interleave unpredictably.
-	srv, err := server.New(cfg, st, log.New(out, "", log.LstdFlags), verbose)
+	logger := log.New(out, "", log.LstdFlags)
+
+	// live is this process's own config.Live; sdlc run, if also running against
+	// the same file, has its own — the two only ever agree through the file on
+	// disk, exactly like a person hand-editing it would cause either to notice.
+	// listen was already resolved from cfg before runServe was called: it's one
+	// of the RestartRequiredFields, so re-reading it live would be misleading —
+	// the socket bound below cannot move without a restart regardless of what
+	// a later edit says.
+	live := config.NewLive(cfg)
+	go live.Watch(ctx, configWatchInterval, logger)
+
+	srv, err := server.New(live, st, logger, verbose)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1

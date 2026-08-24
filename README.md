@@ -116,14 +116,20 @@ sdlc version
 
 `sdlc serve` is a small web UI over the same database: the job list, the gate
 document with its approve/reject form, the diff, the events, the logs, the
-prompts as sent, and a read-only config page. It writes exactly the rows the
+prompts as sent, and a config page — a read-only redacted view plus a raw
+editor that saves straight back to `sdlc.yaml`. It writes exactly the rows the
 CLI writes, so the browser and the terminal are interchangeable, and everything
 it serves is embedded in the binary — it renders with no network at all. It is
 **localhost-only and has no authentication of any kind**: anyone who can reach
-the port can approve a merge and read every artifact. It binds a loopback
-address and refuses anything else; to use it from another machine, forward the
-port (`ssh -L 7777:127.0.0.1:7777 host`). The full list of what it does and does
-not defend against is in [`docs/running.md`](docs/running.md) §8.
+the port can approve a merge, edit the config, and read every artifact. It
+binds a loopback address and refuses anything else; to use it from another
+machine, forward the port (`ssh -L 7777:127.0.0.1:7777 host`). The full list of
+what it does and does not defend against is in [`docs/running.md`](docs/running.md)
+§8; the config page and live reload are §9.
+
+Both `sdlc run` and `sdlc serve` watch `sdlc.yaml` while they run and pick up
+most edits live, without a restart — see
+[`docs/running.md`](docs/running.md) §9 for exactly what still needs one.
 
 ## What the orchestrator enforces (not the prompts)
 
