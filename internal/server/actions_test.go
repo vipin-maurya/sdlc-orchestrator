@@ -20,10 +20,11 @@ import (
 	"github.com/vipinm/sdlc-orchestrator/internal/store"
 )
 
-// gateStates are the four states an approve or reject applies to, paired with
+// gateStates are the five states an approve or reject applies to, paired with
 // the gate review.GateFor names for each. Written out rather than derived so
 // the test fails if that mapping changes, instead of following it.
 var gateStates = []struct{ state, gate string }{
+	{"AWAITING_SCOPE_APPROVAL", review.GateScope},
 	{"AWAITING_SPEC_APPROVAL", review.GateSpec},
 	{"AWAITING_CODE_APPROVAL", review.GateCode},
 	{"AWAITING_MERGE_APPROVAL", review.GateMerge},

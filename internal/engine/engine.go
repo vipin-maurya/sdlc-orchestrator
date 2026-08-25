@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/vipinm/sdlc-orchestrator/internal/agent"
+	"github.com/vipinm/sdlc-orchestrator/internal/artifact"
 	"github.com/vipinm/sdlc-orchestrator/internal/config"
 	"github.com/vipinm/sdlc-orchestrator/internal/gitx"
 	"github.com/vipinm/sdlc-orchestrator/internal/resource"
@@ -164,12 +165,18 @@ func (e *Engine) tick(ctx context.Context) (dispatched bool, pending int, err er
 			e.hold(j, STimedOut, fmt.Sprintf("exceeded limits.max_job_duration (%s)", e.cfg.Limits.MaxJobDuration))
 			continue
 		}
-		// Quota suspension.
-		if j.State == SBlockedQuota {
+		// Backoff suspensions (quota, unreachable backend). Both resume
+		// themselves into the state they were interrupted in; neither has
+		// spent any retry budget getting here.
+		if isSuspended(j.State) {
 			if !j.ResumeAfter.IsZero() && now.After(j.ResumeAfter) {
-				e.logger.Printf("%s: quota backoff elapsed; resuming %s", j.ID, j.PrevState)
+				why := "quota backoff"
+				if j.State == SBlockedNetwork {
+					why = "network backoff"
+				}
+				e.logger.Printf("%s: %s elapsed; resuming %s", j.ID, why, j.PrevState)
 				j.ResumeAfter = time.Time{}
-				e.transition(j, j.PrevState, "quota backoff elapsed")
+				e.transition(j, j.PrevState, why+" elapsed")
 			} else {
 				continue
 			}
@@ -240,7 +247,7 @@ func (e *Engine) handleControls(ctx context.Context, j *store.Job) error {
 	if a, err := e.st.PendingApproval(j.ID, "resume"); err != nil {
 		return err
 	} else if a != nil {
-		if isHeld(j.State) || j.State == SBlockedQuota {
+		if isHeld(j.State) || isSuspended(j.State) {
 			_ = e.st.ConsumeApproval(a.ID)
 			to := strings.TrimSpace(a.Reason)
 			if to == "" {
@@ -300,6 +307,56 @@ func (e *Engine) handleGate(ctx context.Context, j *store.Job) error {
 	_ = e.st.ConsumeApproval(a.ID)
 	e.event(j, "approval", map[string]any{"gate": gate, "decision": a.Decision, "reason": a.Reason})
 	switch {
+	case gate == review.GateScope && a.Decision == "approve":
+		// Approval with questions outstanding is a waiver: planning proceeds on
+		// the recorded assumptions. Naming the waived questions is the point —
+		// a waiver nobody can find later is indistinguishable from a question
+		// that was never asked.
+		if prob, err := artifact.LoadProblem(
+			filepath.Join(artifact.ArtifactsDir(e.cfg.Orchestrator.DataDir, j.ID), "problem.json"),
+		); err == nil {
+			if blocking := prob.BlockingQuestions(); len(blocking) > 0 {
+				ids := make([]string, 0, len(blocking))
+				for _, q := range blocking {
+					ids = append(ids, q.ID)
+				}
+				e.event(j, "note", map[string]any{"scope_questions_waived": ids})
+			}
+		}
+		e.transition(j, SPlanning, "scope approved")
+	case gate == review.GateScope && a.Decision == "reject":
+		if a.Cancel {
+			e.transition(j, SCancelled, "scope rejected (cancelled): "+a.Reason)
+			e.cleanup(ctx, j)
+		} else {
+			// Unlike the spec gate, this counter IS spent on a human decision:
+			// re-scoping is a conversation between the operator and the agent,
+			// and max_scope_rounds is what stops it running forever.
+			j.Counters.ScopeRounds++
+			// Spend the budget here rather than on the way into SCOPING, for
+			// the reason handleScoping documents: an entry check would make
+			// `sdlc resume` — which defaults to the state the job was held in —
+			// escalate again without dispatching anything. Escalating from the
+			// decision that exhausted the budget also puts the operator's own
+			// last answer in the hold reason, where they will read it.
+			if j.Counters.ScopeRounds >= e.cfg.Limits.MaxScopeRounds {
+				e.hold(j, SEscalated, fmt.Sprintf(
+					"scope still unresolved after %d round(s); see problem.json and the gate history. "+
+						"Last answer: %s", j.Counters.ScopeRounds, a.Reason))
+				// PrevState is where a bare `sdlc resume` sends the job, and
+				// this is the one escalation raised from a parked state — which
+				// resume refuses as unrunnable, leaving the operator with a
+				// hold that the command for clearing holds silently declines to
+				// clear. The state they want is the one that does the work.
+				j.PrevState = SScoping
+				if err := e.st.UpdateJob(j); err != nil {
+					e.logger.Printf("%s: persist scope escalation resume target: %v", j.ID, err)
+				}
+				return nil
+			}
+			j.Counters.HumanRejectReason = a.Reason
+			e.transition(j, SScoping, "scope rejected: "+a.Reason)
+		}
 	case gate == review.GateSpec && a.Decision == "approve":
 		e.transition(j, SImplementing, "spec approved")
 	case gate == review.GateSpec && a.Decision == "reject":
@@ -397,6 +454,8 @@ func (e *Engine) step(ctx context.Context, j *store.Job) {
 	switch j.State {
 	case SCreated:
 		next, herr = jc.handleCreated(ctx)
+	case SScoping:
+		next, herr = jc.handleScoping(ctx)
 	case SPlanning:
 		next, herr = jc.handlePlanning(ctx)
 	case SDesignReview:
@@ -432,6 +491,27 @@ func (e *Engine) step(ctx context.Context, j *store.Job) {
 			e.transition(j, SBlockedQuota, fmt.Sprintf("quota/rate limit on backend %s", q.backend))
 			return
 		}
+		// A backend that could not be reached is the job's fault in no way at
+		// all, so it suspends exactly as a quota hit does rather than spending
+		// an attempt. Without this a passing DNS failure burns
+		// limits.max_agent_retries in a few minutes and escalates a job that
+		// would have succeeded on the next try.
+		if u, ok := herr.(unreachableErr); ok {
+			j.ResumeAfter = time.Now().Add(u.backoff)
+			e.event(j, "note", map[string]any{
+				"unreachable": true, "backend": u.backend,
+				"detail": u.detail, "resume_after": j.ResumeAfter,
+			})
+			// HoldReason carries the backend's own sentence, which is the whole
+			// of R6b: without it the job page and the console say only that a
+			// post-condition failed, and the operator goes looking at the
+			// prompt instead of their network. BLOCKED_ON_NETWORK is not a
+			// held state — isHeld excludes it and the backoff still resumes
+			// it unattended — this is the text, not a change of status.
+			j.HoldReason = fmt.Sprintf("backend %s unreachable: %s", u.backend, u.detail)
+			e.transition(j, SBlockedNetwork, j.HoldReason)
+			return
+		}
 		// Whatever the state produced before it failed is exactly what the
 		// operator is about to inspect, and a dirty worktree is one reconcile
 		// away from deletion. Commit it before parking the job.
@@ -461,6 +541,20 @@ type quotaErr struct {
 }
 
 func (q quotaErr) Error() string { return "quota exhausted on " + q.backend }
+
+// unreachableErr suspends a job whose backend could not be talked to. It is
+// quotaErr's sibling and is handled the same way — park, back off, resume into
+// the same state — because the retry budget exists to bound *the agent getting
+// it wrong*, and a network outage is not that.
+type unreachableErr struct {
+	backend string
+	detail  string
+	backoff time.Duration
+}
+
+func (u unreachableErr) Error() string {
+	return "backend " + u.backend + " unreachable: " + u.detail
+}
 
 // holdErr moves a job to a durable hold (usually ESCALATED) with a reason.
 type holdErr struct {

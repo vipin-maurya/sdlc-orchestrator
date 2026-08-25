@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/vipinm/sdlc-orchestrator/internal/review"
 )
 
 // Go's flag package stops parsing at the first non-flag token. Every command
@@ -316,7 +318,13 @@ func TestCreateJobHasOneNonTestCaller(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
-			if d.Name() == ".git" {
+			// .worktrees holds full checkouts of this same repository, one per
+			// in-flight job, whenever the orchestrator is pointed at its own
+			// source tree. Without this skip every file in here is counted
+			// twice and the invariant reads as violated by a copy of the very
+			// file that satisfies it — a test that fails because a job is
+			// running, which is the least useful kind of red there is.
+			if d.Name() == ".git" || d.Name() == ".worktrees" {
 				return fs.SkipDir
 			}
 			return nil
@@ -403,5 +411,66 @@ func TestSecondControlRequestIsRefused(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "already") {
 		t.Errorf("stderr does not say a cancel is already queued:\n%s", stderr)
+	}
+}
+
+// A2: reject already requires a reason on every gate, and the new one inherits
+// that for free through review.GateFor. The scope gate's reason IS the
+// operator's answers, so an empty one would hand the next scoping round
+// nothing to act on. Pinned here because the rule is inherited rather than
+// written, and inherited behaviour is what silently stops applying.
+func TestRejectAtScopeGateRequiresAReason(t *testing.T) {
+	e := newReviewEnv(t)
+	j := e.job("AWAITING_SCOPE_APPROVAL", "fix the thing")
+
+	var code int
+	stderr := captureStderr(t, func() {
+		code = cmdDecision(e.cfg, []string{j.ID}, "reject")
+	})
+	if code == 0 {
+		t.Error("reject with no --reason was accepted at the scope gate")
+	}
+	if !strings.Contains(stderr, "--reason") {
+		t.Errorf("stderr does not say what is missing:\n%s", stderr)
+	}
+
+	captureStderr(t, func() {
+		code = cmdDecision(e.cfg, []string{j.ID, "--reason", "Q1: only the SMS parser"}, "reject")
+	})
+	if code != 0 {
+		t.Fatalf("reject with a reason exited %d at the scope gate, want 0", code)
+	}
+	a, err := e.st.PendingApproval(j.ID, review.GateScope)
+	if err != nil || a == nil {
+		t.Fatalf("no pending row at the scope gate: %v %v", a, err)
+	}
+	if a.Reason != "Q1: only the SMS parser" {
+		t.Errorf("reason=%q, want the operator's answers verbatim", a.Reason)
+	}
+}
+
+func TestApproveAtScopeGateWritesTheScopeRow(t *testing.T) {
+	e := newReviewEnv(t)
+	j := e.job("AWAITING_SCOPE_APPROVAL", "fix the thing")
+
+	var code int
+	captureStderr(t, func() { code = cmdDecision(e.cfg, []string{j.ID}, "approve") })
+	if code != 0 {
+		t.Fatalf("approve exited %d at the scope gate, want 0", code)
+	}
+	if a, err := e.st.PendingApproval(j.ID, review.GateScope); err != nil || a == nil {
+		t.Fatalf("approve did not write a row under the scope gate: %v %v", a, err)
+	}
+}
+
+func TestStatusRendersTheScopeGateAndClarification(t *testing.T) {
+	e := newReviewEnv(t)
+	j := e.job("AWAITING_SCOPE_APPROVAL", "fix the thing")
+
+	stdout := captureStdout(t, func() { cmdStatus(e.cfg, []string{j.ID}) })
+	for _, want := range []string{"scope_rounds=0", "approve the scoped problem before a spec is written", "sdlc review " + j.ID} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("status output is missing %q:\n%s", want, stdout)
+		}
 	}
 }

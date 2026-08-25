@@ -1,0 +1,13 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "sdlc-web",
+      "runtimeExecutable": "C:/Users/vm899/repos/sdlc-orchestrator/sdlc.exe",
+      "runtimeArgs": [
+        "serve"
+      ],
+      "port": 7777
+    }
+  ]
+}

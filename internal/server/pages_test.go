@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/vipinm/sdlc-orchestrator/internal/artifact"
+	"github.com/vipinm/sdlc-orchestrator/internal/config"
 	"github.com/vipinm/sdlc-orchestrator/internal/store"
 )
 
@@ -576,5 +577,72 @@ func TestSubmitFormOffersExactlyTheConfiguredTargets(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("the submit form has no %s field", want)
 		}
+	}
+}
+
+// Every gate config.Validate accepts in policies.human_gates must have a row
+// on the page whose whole job is to say what this config will stop for. Derived
+// from config.OptionalHumanGates rather than written out, because the failure
+// this guards against is a new gate being added to the validator and forgotten
+// here — and a hardcoded list would be forgotten in exactly the same edit.
+func TestGateOptsCoversEveryOptionalGate(t *testing.T) {
+	e := newEnv(t)
+	e.srv.cfg.Policies.HumanGates = append([]string{}, config.OptionalHumanGates...)
+
+	rows := e.srv.gateOpts()
+	byName := map[string]gateOpt{}
+	for _, r := range rows {
+		byName[r.Name] = r
+	}
+	for _, g := range config.OptionalHumanGates {
+		row, ok := byName[g]
+		if !ok {
+			t.Errorf("policies.human_gates accepts %q but the page has no row for it", g)
+			continue
+		}
+		if !row.On {
+			t.Errorf("gate %q is armed in the policy but the page reports it off", g)
+		}
+		if row.Always {
+			t.Errorf("gate %q is optional but the page draws it as always-on", g)
+		}
+		if row.Detail == "" {
+			t.Errorf("gate %q has no detail text", g)
+		}
+	}
+	// The two the policy cannot switch off are still there, and still marked.
+	for _, g := range []string{"merge", "release"} {
+		row, ok := byName[g]
+		if !ok {
+			t.Fatalf("the page dropped the always-enforced %q gate", g)
+		}
+		if !row.Always || !row.On {
+			t.Errorf("gate %q must draw as always-on, got Always=%v On=%v", g, row.Always, row.On)
+		}
+	}
+}
+
+// The step list names the first state a job enters, so it has to follow the
+// policy that decides which state that is. A hardcoded list told submitters
+// PLANNING ran first for as long as scoping had been on by default.
+func TestSubmitStepsFollowTheScopingPolicy(t *testing.T) {
+	e := newEnv(t)
+
+	e.srv.cfg.Policies.Scoping = "on"
+	on := strings.Join(e.srv.submitSteps(), " | ")
+	if !strings.Contains(on, "SCOPING") {
+		t.Errorf("scoping is armed but the steps do not mention it: %s", on)
+	}
+	if strings.Index(on, "SCOPING") > strings.Index(on, "PLANNING") {
+		t.Error("SCOPING is listed after PLANNING; the steps are in pipeline order")
+	}
+
+	e.srv.cfg.Policies.Scoping = "off"
+	off := strings.Join(e.srv.submitSteps(), " | ")
+	if strings.Contains(off, "SCOPING") {
+		t.Errorf("scoping is off but the steps still promise it: %s", off)
+	}
+	if !strings.Contains(off, "PLANNING") {
+		t.Errorf("the steps stopped naming the first state that runs: %s", off)
 	}
 }

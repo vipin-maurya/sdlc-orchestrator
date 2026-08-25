@@ -29,6 +29,7 @@ orchestrator:
 
 limits:
   max_job_duration: 12h         # wall clock from submit; then TIMED_OUT
+  max_scope_rounds: 2           # scoping iteration cap; then ESCALATED
   max_design_review_rounds: 2   # spec/plan rejection loop cap
   max_code_review_rounds: 3
   max_fix_attempts: 3           # shared fix budget across all fix loops
@@ -72,6 +73,14 @@ backends:
     default_timeout: 30m
     permission_mode: bypassPermissions   # safe: agents only run inside job worktrees
     quota_backoff: 30m            # BLOCKED_ON_QUOTA suspension on rate limits
+    # A backend that cannot be reached at all (DNS, refused connection) is not
+    # the job's fault, so it suspends to BLOCKED_ON_NETWORK and retries after
+    # this backoff instead of spending limits.max_agent_retries. Shorter than
+    # quota_backoff: a network blip is usually over in a minute, a rate limit
+    # is not. transport_error_patterns defaults to a list covering the common
+    # errno strings; the claude CLI's own terminal_reason is preferred when
+    # present, so the patterns are only a fallback.
+    transport_backoff: 2m
     # expected_version: "2.1.0"   # non-empty => sdlc validate warns on drift
     # Ask the CLI for --output-format stream-json (plus --verbose, which that
     # format requires) so each tool call is visible while the state runs
@@ -89,6 +98,7 @@ backends:
     settings_file: ${USERPROFILE}/.gemini/antigravity-cli/settings.json
     ensure_permissions: []        # grants sdlc validate checks for (headless soft-deny guard)
     assert_model: true            # fail the state if agy silently ran another model
+    transport_backoff: 2m         # BLOCKED_ON_NETWORK suspension; see claude above
 
 agents:
   opus:   { backend: claude, model: opus,   effort: high }
@@ -107,6 +117,7 @@ agents:
 # the orchestrator. CODE_REVIEW and FINAL_REVIEW must run on a different
 # backend than IMPLEMENTING (asserted at startup).
 states:
+  SCOPING:       { agent: opus,   timeout: 15m, disallowed_tools: [Edit, NotebookEdit] }
   PLANNING:      { agent: opus,   timeout: 30m }
   DESIGN_REVIEW: { agent: sonnet, timeout: 15m, disallowed_tools: [Edit, NotebookEdit, Bash] }
   IMPLEMENTING:  { agent: gemini, timeout: 45m }
@@ -127,6 +138,7 @@ states:
   # embedded default template for that state).
 
 policies:
+  scoping: "on"                 # on | off (reproduces pre-feature CREATED -> PLANNING)
   protected_branches: [main, master]
   # Lowest finding severity that stops the pipeline at each review gate:
   # blocker | major | minor | nit. Findings below the threshold never block but
@@ -137,10 +149,11 @@ policies:
   design_review_blocks_at: major
   code_review_blocks_at: blocker
   final_review_blocks_at: blocker
-  # Optional earlier stops: `spec` after design review passes and before any
-  # code is written, `code` after code review passes and before build and
-  # test. Merge and release are always enforced; this key only adds stops.
-  # human_gates: [spec, code]
+  # Optional earlier stops: `scope` after scoping completes, `spec` after
+  # design review passes and before any code is written, `code` after code
+  # review passes and before build and test. Merge and release are always
+  # enforced; this key only adds stops.
+  # human_gates: [scope, spec, code]
   protect_tests_on_code_bug_fix: true   # FIXING may not touch tests when the failure was a code bug
   test_file_globs:
     - "**/src/test/**"

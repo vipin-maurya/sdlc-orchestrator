@@ -841,12 +841,7 @@ type kvRow struct {
 }
 
 func (s *Server) handleSubmitForm(w http.ResponseWriter, r *http.Request) {
-	body := submitPage{Steps: []string{
-		"A worktree is cut from the target's default branch at its current head.",
-		"PLANNING writes a plan and a test list into the job's artifacts directory.",
-		"The job parks at the first armed gate and appears in Waiting on you.",
-		"Nothing is pushed or shipped until you approve the merge and release gates.",
-	}}
+	body := submitPage{Steps: s.submitSteps()}
 	names := make([]string, 0, len(s.cfg.Targets))
 	for name := range s.cfg.Targets {
 		names = append(names, name)
@@ -862,12 +857,35 @@ func (s *Server) handleSubmitForm(w http.ResponseWriter, r *http.Request) {
 	s.render(w, r, "submit.html", s.page(r, "Submit a job", "submit", body))
 }
 
-// gateOpts reports the four gates and which of them this config arms. The two
-// that are always armed are listed first and marked, because the order a
-// reader scans them in is the order the pipeline reaches them.
+// submitSteps is what the page promises will happen to the job, and it is read
+// from the policy rather than written down once, because a step list that names
+// the first state the pipeline enters is wrong the moment a state is added in
+// front of it — which is exactly how this list came to describe PLANNING as the
+// first thing a job does after scoping was put ahead of it.
+func (s *Server) submitSteps() []string {
+	steps := []string{"A worktree is cut from the target's default branch at its current head."}
+	if s.cfg.Policies.ScopingEnabled() {
+		steps = append(steps,
+			"SCOPING reads the repository and writes the problem statement the rest of the job is bound by.")
+	}
+	return append(steps,
+		"PLANNING writes a spec and a plan into the job's artifacts directory.",
+		"The job parks at the first armed gate and appears in Waiting on you.",
+		"Nothing is pushed or shipped until you approve the merge and release gates.",
+	)
+}
+
+// gateOpts reports the five gates and which of them this config arms, in the
+// order the pipeline reaches them. The two that are always armed are marked,
+// because a checkbox that cannot be unchecked is a lie about who is in control.
+//
+// Every optional gate config.Validate accepts belongs here. A gate this list
+// forgets is one an operator can arm in sdlc.yaml and then never see on the
+// page whose whole job is to say what this config will stop for.
 func (s *Server) gateOpts() []gateOpt {
 	p := s.cfg.Policies
 	return []gateOpt{
+		{Name: "scope", Detail: "After scoping, before a spec is written.", On: p.HumanGate("scope")},
 		{Name: "spec", Detail: "After design review, before any code is written.", On: p.HumanGate("spec")},
 		{Name: "code", Detail: "After code review, before build and test.", On: p.HumanGate("code")},
 		{Name: "merge", Detail: "Before the branch lands on the base branch.", On: true, Always: true},

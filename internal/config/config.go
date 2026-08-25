@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +45,7 @@ func (d Duration) String() string { return time.Duration(d).String() }
 // Agent state names. These are the only states that invoke an agent; the
 // full state enum lives in the engine package.
 const (
+	StScoping      = "SCOPING"
 	StPlanning     = "PLANNING"
 	StDesignReview = "DESIGN_REVIEW"
 	StImplementing = "IMPLEMENTING"
@@ -57,9 +59,46 @@ const (
 	StVerifying = "VERIFYING"
 )
 
+// OptionalHumanGates are the gates policies.human_gates can add, in the order
+// the pipeline reaches them. Merge and release are always enforced and are
+// accepted in the key as a no-op, so they are not listed here.
+//
+// This is the list, not a copy of it: Validate checks against it and the web
+// UI's gate rows are asserted against it, so a gate added in one place cannot
+// go missing from the other.
+var OptionalHumanGates = []string{"scope", "spec", "code"}
+
+// defaultTransportPatterns match "the backend could not be reached", as
+// distinct from "the backend answered and the answer was wrong". They are the
+// fallback for a CLI that reports no structured reason — the claude backend's
+// own `terminal_reason: "api_error"` is preferred where it is present.
+//
+// Node's errno strings are here because both shipped backends are Node CLIs
+// and surface them verbatim; the prose alternatives cover a CLI that has
+// already turned the errno into a sentence.
+//
+// Returned by a function rather than shared as a package var so two backends
+// cannot end up aliasing one slice and mutating each other.
+func defaultTransportPatterns() []string {
+	return []string{
+		`(?i)\b(ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EPIPE)\b`,
+		`(?i)can'?t reach the API`,
+		`(?i)getaddrinfo`,
+		`(?i)socket hang ?up`,
+		`(?i)network (error|is unreachable)`,
+		`(?i)(connection|request) timed out`,
+	}
+}
+
+// DefaultTransportPatternsForTest exposes the shipped list so the agent
+// package can assert it fires on real CLI output. The patterns and the code
+// that matches them live in different packages; a copy in the test would prove
+// only that the copy is right.
+func DefaultTransportPatternsForTest() []string { return defaultTransportPatterns() }
+
 // AgentStates lists every state that must have an entry under `states:`.
 var AgentStates = []string{
-	StPlanning, StDesignReview, StImplementing, StCodeReview,
+	StScoping, StPlanning, StDesignReview, StImplementing, StCodeReview,
 	StAnalyzing, StFixing, StFinalReview, StVerifying,
 }
 
@@ -108,8 +147,11 @@ type Database struct {
 }
 
 type Limits struct {
-	MaxJobDuration            Duration `yaml:"max_job_duration"`
-	MaxDesignReviewRounds     int      `yaml:"max_design_review_rounds"`
+	MaxJobDuration        Duration `yaml:"max_job_duration"`
+	MaxDesignReviewRounds int      `yaml:"max_design_review_rounds"`
+	// MaxScopeRounds caps the human↔agent re-scoping loop. A loop that neither
+	// side ends is worse than a stop, so exhausting it escalates.
+	MaxScopeRounds            int      `yaml:"max_scope_rounds"`
 	MaxCodeReviewRounds       int      `yaml:"max_code_review_rounds"`
 	MaxFixAttempts            int      `yaml:"max_fix_attempts"`
 	MaxFlakeRetries           int      `yaml:"max_flake_retries"`
@@ -172,8 +214,15 @@ type Backend struct {
 	AssertModel        bool     `yaml:"assert_model"`       // agy only
 	QuotaErrorPatterns []string `yaml:"quota_error_patterns"`
 	QuotaBackoff       Duration `yaml:"quota_backoff"`
-	ExpectedVersion    string   `yaml:"expected_version"`
-	ExtraArgs          []string `yaml:"extra_args"`
+	// TransportErrorPatterns match a backend that could not be reached at all.
+	// Kept separate from the quota patterns because the two need different
+	// backoffs: a rate limit is a wait measured in tens of minutes, a DNS
+	// failure is usually over in one. Both suspend rather than spending the
+	// retry budget, which is the point of either list.
+	TransportErrorPatterns []string `yaml:"transport_error_patterns"`
+	TransportBackoff       Duration `yaml:"transport_backoff"`
+	ExpectedVersion        string   `yaml:"expected_version"`
+	ExtraArgs              []string `yaml:"extra_args"`
 	// ArgvTemplate is used by kind "exec": each element is expanded with
 	// {model} {effort} {prompt_file} placeholders. Prompt text is also piped
 	// to stdin.
@@ -225,6 +274,17 @@ type Policies struct {
 	// default: an unattended run should not acquire a new place to stop
 	// because this key exists.
 	HumanGates []string `yaml:"human_gates"`
+	// Scoping is on|off. Off restores the previous pipeline exactly:
+	// CREATED goes straight to PLANNING and no problem.json is produced.
+	Scoping string `yaml:"scoping"`
+}
+
+// ScopingEnabled reports whether the SCOPING state runs. It is a string rather
+// than a bool in YAML to match run_in/push/cleanup_worktrees, and it is read
+// through this method so an invalid value — which Validate rejects — can never
+// read as enabled.
+func (p Policies) ScopingEnabled() bool {
+	return strings.EqualFold(strings.TrimSpace(p.Scoping), "on")
 }
 
 // HumanGate reports whether an optional human checkpoint is enabled.
@@ -317,6 +377,7 @@ func Default() *Config {
 		Database: Database{BusyTimeout: Duration(5 * time.Second)},
 		Limits: Limits{
 			MaxJobDuration:            Duration(12 * time.Hour),
+			MaxScopeRounds:            2,
 			MaxDesignReviewRounds:     2,
 			MaxCodeReviewRounds:       3,
 			MaxFixAttempts:            3,
@@ -354,7 +415,9 @@ func Default() *Config {
 				QuotaErrorPatterns: []string{
 					`(?i)rate.?limit`, `(?i)usage.?limit`, `(?i)overloaded`, `(?i)quota`,
 				},
-				QuotaBackoff: Duration(30 * time.Minute),
+				QuotaBackoff:           Duration(30 * time.Minute),
+				TransportErrorPatterns: defaultTransportPatterns(),
+				TransportBackoff:       Duration(2 * time.Minute),
 			},
 			"agy": {
 				Kind:           "agy",
@@ -367,7 +430,9 @@ func Default() *Config {
 				QuotaErrorPatterns: []string{
 					`(?i)rate.?limit`, `(?i)quota`, `(?i)resource.?exhausted`,
 				},
-				QuotaBackoff: Duration(30 * time.Minute),
+				QuotaBackoff:           Duration(30 * time.Minute),
+				TransportErrorPatterns: defaultTransportPatterns(),
+				TransportBackoff:       Duration(2 * time.Minute),
 			},
 		},
 		Agents: map[string]Agent{
@@ -380,6 +445,12 @@ func Default() *Config {
 		// clean-tree check, and the diff they review is pre-staged by the
 		// orchestrator so Bash is not needed.
 		States: map[string]State{
+			// SCOPING keeps Bash, unlike the reviewers: scoping "Fix 1.0.6
+			// issues" means reading what 1.0.6 actually changed, and git log is
+			// how that is answered. Read-only exploration is the whole job of
+			// this state. It still may not edit the tree — discardTreeChanges
+			// enforces it.
+			StScoping:      {Agent: "opus", Timeout: Duration(15 * time.Minute), DisallowedTools: []string{"Edit", "NotebookEdit"}},
 			StPlanning:     {Agent: "opus", Timeout: Duration(30 * time.Minute)},
 			StDesignReview: {Agent: "sonnet", Timeout: Duration(15 * time.Minute), DisallowedTools: []string{"Edit", "NotebookEdit", "Bash"}},
 			StImplementing: {Agent: "gemini", Timeout: Duration(45 * time.Minute)},
@@ -403,6 +474,7 @@ func Default() *Config {
 			DesignReviewBlocksAt:    "blocker",
 			CodeReviewBlocksAt:      "blocker",
 			FinalReviewBlocksAt:     "blocker",
+			Scoping:                 "on",
 		},
 		Git:    Git{CleanupWorktrees: "on_success"},
 		Server: Server{Listen: defaultListen},
@@ -591,12 +663,28 @@ func (c *Config) applyComputedDefaults() {
 			if b.QuotaBackoff == 0 {
 				b.QuotaBackoff = d.QuotaBackoff
 			}
+			if len(b.TransportErrorPatterns) == 0 {
+				b.TransportErrorPatterns = d.TransportErrorPatterns
+			}
+			if b.TransportBackoff == 0 {
+				b.TransportBackoff = d.TransportBackoff
+			}
 		}
 		if b.DefaultTimeout == 0 {
 			b.DefaultTimeout = Duration(30 * time.Minute)
 		}
 		if b.QuotaBackoff == 0 {
 			b.QuotaBackoff = Duration(30 * time.Minute)
+		}
+		// A custom `exec` backend has no defaults entry to inherit from, and a
+		// backend with no transport patterns silently loses the protection
+		// entirely — so every backend gets the list, not just the two shipped
+		// ones.
+		if len(b.TransportErrorPatterns) == 0 {
+			b.TransportErrorPatterns = defaultTransportPatterns()
+		}
+		if b.TransportBackoff == 0 {
+			b.TransportBackoff = Duration(2 * time.Minute)
 		}
 		b.SettingsFile = expandEnv(b.SettingsFile)
 		c.Backends[name] = b
@@ -688,11 +776,20 @@ func (c *Config) Validate() error {
 			fail("policies.%s must be blocker|major|minor|nit, got %q", key, sev)
 		}
 	}
+	switch strings.ToLower(strings.TrimSpace(c.Policies.Scoping)) {
+	case "on", "off":
+	default:
+		fail("policies.scoping must be on|off, got %q", c.Policies.Scoping)
+	}
+	if c.Limits.MaxScopeRounds < 1 {
+		fail("limits.max_scope_rounds must be >= 1")
+	}
 	for _, g := range c.Policies.HumanGates {
-		switch strings.ToLower(strings.TrimSpace(g)) {
-		case "spec", "code", "merge", "release":
+		switch n := strings.ToLower(strings.TrimSpace(g)); {
+		case slices.Contains(OptionalHumanGates, n), n == "merge", n == "release":
 		default:
-			fail("policies.human_gates: unknown gate %q (spec|code|merge|release)", g)
+			fail("policies.human_gates: unknown gate %q (%s|merge|release)", g,
+				strings.Join(OptionalHumanGates, "|"))
 		}
 	}
 	for name, b := range c.Backends {
@@ -708,6 +805,11 @@ func (c *Config) Validate() error {
 		for _, p := range b.QuotaErrorPatterns {
 			if _, err := regexp.Compile(p); err != nil {
 				fail("backends.%s.quota_error_patterns %q: %v", name, p, err)
+			}
+		}
+		for _, p := range b.TransportErrorPatterns {
+			if _, err := regexp.Compile(p); err != nil {
+				fail("backends.%s.transport_error_patterns %q: %v", name, p, err)
 			}
 		}
 	}

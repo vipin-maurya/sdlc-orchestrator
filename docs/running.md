@@ -247,12 +247,20 @@ with a reason attached, and every one of them is cleared by hand:
 
 | State | What happened | How it clears |
 |---|---|---|
+| `AWAITING_SCOPE_APPROVAL` | The scoping agent raised a blocking question, or `policies.human_gates` lists `scope` | `sdlc review JOB-1`, or `sdlc approve JOB-1` / `sdlc reject JOB-1 --reason "..."` |
 | `AWAITING_SPEC_APPROVAL` | The spec and plan passed design review, and `policies.human_gates` lists `spec` | `sdlc review JOB-1`, or `sdlc approve JOB-1` / `sdlc reject JOB-1 --reason "..."` |
 | `AWAITING_CODE_APPROVAL` | The implementation passed code review, and `policies.human_gates` lists `code` | `sdlc review JOB-1`, or `sdlc approve JOB-1` / `sdlc reject JOB-1 --reason "..."` |
 | `AWAITING_MERGE_APPROVAL` / `AWAITING_RELEASE_APPROVAL` | Human gate | `sdlc approve JOB-1` / `sdlc reject JOB-1 --reason "..."` |
 | `ESCALATED` | A round cap, retry cap, invocation budget or policy violation | `sdlc resume JOB-1` (optionally `--to STATE`) |
 | `TIMED_OUT` | `limits.max_job_duration` or a per-state timeout | `sdlc resume JOB-1` |
 | `BLOCKED_ON_QUOTA` | The agent CLI was rate-limited | Nothing — it resumes itself after `quota_backoff` |
+| `BLOCKED_ON_NETWORK` | The agent CLI could not reach its API at all (DNS, refused connection) | Nothing — it resumes itself after `transport_backoff`. The hold reason quotes the CLI's own error |
+
+`BLOCKED_ON_NETWORK` is the same idea for a backend that could not be reached.
+Both spend no retry budget: `limits.max_agent_retries` exists to bound an agent
+getting the work wrong, and neither a rate limit nor a dead network is that. A
+transient outage used to burn all three attempts in a few minutes and escalate
+the job; now it waits and picks up where it left off.
 
 `BLOCKED_ON_QUOTA` is deliberately not a failure: a rate-limited run suspends
 the job instead of burning a retry budget. Start with `sdlc status JOB-1` for

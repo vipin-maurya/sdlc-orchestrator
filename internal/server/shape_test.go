@@ -24,7 +24,7 @@ func TestEveryEngineStateHasAPhase(t *testing.T) {
 	// Every state the engine can put a job in, from its own list plus the
 	// ones resume cannot target.
 	states := append(engine.ResumableStates(),
-		"CREATED", "AWAITING_SPEC_APPROVAL", "AWAITING_CODE_APPROVAL",
+		"CREATED", "AWAITING_SCOPE_APPROVAL", "AWAITING_SPEC_APPROVAL", "AWAITING_CODE_APPROVAL",
 		"AWAITING_MERGE_APPROVAL", "AWAITING_RELEASE_APPROVAL", "COMPLETED",
 		"CANCELLED", "FAILED", "ESCALATED", "TIMED_OUT", "BLOCKED_ON_QUOTA")
 
@@ -208,7 +208,7 @@ func between(t *testing.T, s, open, close string) string {
 func TestIsRunningIsTheComplementOfTheStoppedStates(t *testing.T) {
 	stopped := []string{
 		"COMPLETED", "CANCELLED", "FAILED",
-		"AWAITING_SPEC_APPROVAL", "AWAITING_CODE_APPROVAL",
+		"AWAITING_SCOPE_APPROVAL", "AWAITING_SPEC_APPROVAL", "AWAITING_CODE_APPROVAL",
 		"AWAITING_MERGE_APPROVAL", "AWAITING_RELEASE_APPROVAL",
 		"ESCALATED", "TIMED_OUT",
 		// No gate, no human to wait for, and no work dispatched either: the

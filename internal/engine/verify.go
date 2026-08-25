@@ -246,6 +246,14 @@ func (c *jobCtx) runVerifiers(ctx context.Context, f artifact.Finding, n int) ([
 				results[i] = slot{err: fmt.Errorf("spawn %s: %w", backend.Binary, runErr)}
 				return
 			}
+			if res.Unreachable {
+				results[i] = slot{err: unreachableErr{
+					backend: ag.Backend,
+					detail:  agent.UnreachableDetail(res.Stdout),
+					backoff: backend.TransportBackoff.D(),
+				}}
+				return
+			}
 			if res.QuotaHit {
 				results[i] = slot{err: quotaErr{backend: ag.Backend, backoff: backend.QuotaBackoff.D()}}
 				return
@@ -274,10 +282,10 @@ func (c *jobCtx) runVerifiers(ctx context.Context, f artifact.Finding, n int) ([
 	for i, r := range results {
 		switch {
 		case r.err != nil:
-			// A quota error must reach the engine: the job suspends rather
-			// than deciding the finding on a partial vote.
-			if q, ok := r.err.(quotaErr); ok {
-				return nil, q
+			// A suspension must reach the engine: the job parks and retries the
+			// whole fan-out rather than deciding the finding on a partial vote.
+			if s, ok := suspendErr(r.err); ok {
+				return nil, s
 			}
 			dropped = append(dropped, fmt.Sprintf("v%d: %v", i+1, r.err))
 		case r.v != nil:

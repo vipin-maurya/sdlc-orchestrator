@@ -11,3 +11,14 @@
 /sdlc.yaml
 
 .idea
+
+# Worktrees the orchestrator creates for in-flight jobs (.worktrees/JOB-2/ is a
+# full second checkout). Anchored: only the one at the repo root.
+/.worktrees/
+
+# Per-run state the sdlc skill writes. Local to this machine's runs.
+/.sdlc/
+
+# Local Claude Code settings: machine-specific, and settings.local.json carries
+# a blanket permission grant that must not follow a clone.
+/.claude/settings.local.json

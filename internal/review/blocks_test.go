@@ -35,7 +35,7 @@ import (
 // the tree — a gate document that reads correctly in the terminal and is
 // missing a paragraph in the browser.
 func TestBodyIsRenderedFromBlocks(t *testing.T) {
-	for _, gate := range []string{GateSpec, GateCode, GateMerge, GateRelease, GateHold} {
+	for _, gate := range []string{GateScope, GateSpec, GateCode, GateMerge, GateRelease, GateHold} {
 		t.Run(gate, func(t *testing.T) {
 			doc, err := Render(context.Background(), goldenOptions(gate))
 			if err != nil {

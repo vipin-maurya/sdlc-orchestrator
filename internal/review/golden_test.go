@@ -53,10 +53,10 @@ const (
 	goldenBaseSHA = "9f1c0d3a7b5e2148c6a0d9f3b71e4c825a6d0f39"
 )
 
-// TestMarkdownGoldenUnchanged renders all five gates and compares Doc.Body
+// TestMarkdownGoldenUnchanged renders all six gates and compares Doc.Body
 // byte for byte against the committed documents.
 func TestMarkdownGoldenUnchanged(t *testing.T) {
-	for _, gate := range []string{GateSpec, GateCode, GateMerge, GateRelease, GateHold} {
+	for _, gate := range []string{GateScope, GateSpec, GateCode, GateMerge, GateRelease, GateHold} {
 		t.Run(gate, func(t *testing.T) {
 			doc, err := Render(context.Background(), goldenOptions(gate))
 			if err != nil {
@@ -158,6 +158,8 @@ func goldenOptions(gate string) Options {
 // a fixture teaching the reader something untrue.
 func goldenState(gate string) string {
 	switch gate {
+	case GateScope:
+		return "AWAITING_SCOPE_APPROVAL"
 	case GateSpec:
 		return "AWAITING_SPEC_APPROVAL"
 	case GateCode:

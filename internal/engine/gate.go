@@ -154,6 +154,18 @@ func (e *Engine) printGateNotice(j *store.Job, n gateNotice, reminder bool) {
 // call below is a process spawn and tick walks every job in series.
 func (e *Engine) gateHeadline(ctx context.Context, j *store.Job, gate string, t config.Target) string {
 	switch gate {
+	case review.GateScope:
+		p, err := artifact.LoadProblem(filepath.Join(artifact.ArtifactsDir(e.cfg.Orchestrator.DataDir, j.ID), "problem.json"))
+		if err != nil {
+			return ""
+		}
+		// The two ways into this gate need different responses, and which one
+		// it is decides whether the operator can skim the document or has to
+		// answer something. That is the fact worth the one line.
+		if n := len(p.BlockingQuestions()); n > 0 {
+			return fmt.Sprintf("blocked on %d question(s)", n)
+		}
+		return "clarity: " + p.Clarity
 	case review.GateSpec:
 		p, err := artifact.LoadPlan(filepath.Join(artifact.ArtifactsDir(e.cfg.Orchestrator.DataDir, j.ID), "plan.json"))
 		if err != nil {

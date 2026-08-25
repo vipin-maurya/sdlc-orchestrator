@@ -1,0 +1,37 @@
+{
+  "schema": "problem/1",
+  "problem_statement": "execx writes every captured line to the job log verbatim, so a token pasted into an issue body is stored in plain text on disk and reprinted by every log tail afterwards.",
+  "in_scope": [
+    "The single point in internal/execx where captured bytes become a log line.",
+    "Configuration of the patterns that decide what a token looks like."
+  ],
+  "out_of_scope": [
+    "Rewriting log files already on disk.",
+    "Redacting the prompts sent to the backend."
+  ],
+  "success_criteria": [
+    "A captured line matching a configured token shape is stored as `[redacted]`.",
+    "A line matching nothing is byte-identical to what the command wrote."
+  ],
+  "assumptions": [
+    {
+      "assumption": "Redaction belongs in execx rather than in each caller.",
+      "basis": "Every log line in the tree already goes through execx.capture; no other package writes to the job log."
+    }
+  ],
+  "open_questions": [
+    {
+      "id": "Q1",
+      "question": "Should the patterns ship with a default set, or must every install configure its own?",
+      "why_it_matters": "A default set redacts on day one but will match things nobody intended; an empty default is safe and protects nobody until someone edits the config.",
+      "blocking": true
+    },
+    {
+      "id": "Q2",
+      "question": "Is the agent prompt log worth a follow-up ticket?",
+      "why_it_matters": "It has the same exposure and is explicitly out of scope here.",
+      "blocking": false
+    }
+  ],
+  "clarity": "blocked"
+}
